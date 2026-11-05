@@ -34,8 +34,12 @@
 //! shortcuts are used, while the application id defaults to
 //! `org.gnome.Ptyxis.Devel` to avoid talking to an installed instance.
 
+pub mod app;
 pub mod config;
 pub mod palette;
 pub mod profile;
 pub mod settings;
 pub mod spawn;
+pub mod tab;
+pub mod terminal;
+pub mod window;

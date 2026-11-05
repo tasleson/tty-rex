@@ -40,6 +40,7 @@ pub mod key {
     pub const DEFAULT_PROFILE_UUID: &str = "default-profile-uuid";
     pub const DEFAULT_ROWS: &str = "default-rows";
     pub const FONT_NAME: &str = "font-name";
+    pub const IGNORE_OSC_TITLE: &str = "ignore-osc-title";
     pub const INTERFACE_STYLE: &str = "interface-style";
     pub const NEW_TAB_POSITION: &str = "new-tab-position";
     pub const PROFILE_UUIDS: &str = "profile-uuids";
@@ -57,6 +58,7 @@ pub mod key {
         DEFAULT_PROFILE_UUID,
         DEFAULT_ROWS,
         FONT_NAME,
+        IGNORE_OSC_TITLE,
         INTERFACE_STYLE,
         NEW_TAB_POSITION,
         PROFILE_UUIDS,
@@ -69,7 +71,7 @@ pub mod key {
 
 /// Schema and key providing the desktop monospace font.
 const DESKTOP_INTERFACE_SCHEMA_ID: &str = "org.gnome.desktop.interface";
-const DESKTOP_MONOSPACE_FONT_KEY: &str = "monospace-font-name";
+pub const DESKTOP_MONOSPACE_FONT_KEY: &str = "monospace-font-name";
 /// Same fallback as `ptyxis_application_init()`.
 const FALLBACK_SYSTEM_FONT: &str = "Monospace 11";
 
@@ -323,6 +325,10 @@ impl AppSettings {
 
     pub fn audible_bell(&self) -> bool {
         self.settings.boolean(key::AUDIBLE_BELL)
+    }
+
+    pub fn ignore_osc_title(&self) -> bool {
+        self.settings.boolean(key::IGNORE_OSC_TITLE)
     }
 
     pub fn cursor_shape(&self) -> CursorShape {
