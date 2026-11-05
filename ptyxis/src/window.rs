@@ -67,6 +67,7 @@ relm4::new_stateless_action!(pub ZoomInAction, WindowActions, "zoom-in");
 relm4::new_stateless_action!(pub ZoomOutAction, WindowActions, "zoom-out");
 relm4::new_stateless_action!(pub ZoomOneAction, WindowActions, "zoom-one");
 relm4::new_stateless_action!(pub SearchAction, WindowActions, "search");
+relm4::new_stateless_action!(pub SetTitleAction, WindowActions, "set-title");
 relm4::new_stateless_action!(pub PreferencesAction, WindowActions, "preferences");
 relm4::new_stateless_action!(
     pub ShowKeyboardShortcutsAction,
@@ -98,6 +99,7 @@ pub enum WindowInput {
     ZoomReset,
     ShowFind,
     FindDismissed,
+    SetTitle,
     ShowPreferences,
     ShowKeyboardShortcuts,
     SelectedPageChanged,
@@ -458,6 +460,7 @@ impl Component for Window {
         add_action::<ZoomOutAction>(&window, &sender, || WindowInput::ZoomOut);
         add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset);
         add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
+        add_action::<SetTitleAction>(&window, &sender, || WindowInput::SetTitle);
         add_action::<PreferencesAction>(&window, &sender, || WindowInput::ShowPreferences);
         add_action::<ShowKeyboardShortcutsAction>(&window, &sender, || {
             WindowInput::ShowKeyboardShortcuts
@@ -554,6 +557,7 @@ impl Component for Window {
                     self.find_bar.emit(FindBarInput::Focus);
                 }
             }
+            WindowInput::SetTitle => self.send_to_active_tab(TabInput::ShowTitleDialog),
             WindowInput::ShowPreferences => {
                 self.app.show_preferences(Some(self.window.upcast_ref()));
             }

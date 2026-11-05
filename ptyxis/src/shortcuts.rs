@@ -42,6 +42,7 @@ pub mod key {
     pub const PREFERENCES: &str = "preferences";
     pub const SHOW_KEYBOARD_SHORTCUTS: &str = "show-keyboard-shortcuts";
     pub const SEARCH: &str = "search";
+    pub const SET_TITLE: &str = "set-title";
     pub const ZOOM_IN: &str = "zoom-in";
     pub const ZOOM_ONE: &str = "zoom-one";
     pub const ZOOM_OUT: &str = "zoom-out";
@@ -59,6 +60,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     (key::PREFERENCES, "win.preferences"),
     (key::SHOW_KEYBOARD_SHORTCUTS, "win.show-keyboard-shortcuts"),
     (key::SEARCH, "win.search"),
+    (key::SET_TITLE, "win.set-title"),
     (key::ZOOM_IN, "win.zoom-in"),
     (key::ZOOM_ONE, "win.zoom-one"),
     (key::ZOOM_OUT, "win.zoom-out"),
@@ -378,8 +380,8 @@ mod tests {
     use crate::settings::schema_template;
     use crate::window::{
         CloseTabAction, CopyAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
-        PreferencesAction, PreviousTabAction, SearchAction, ShowKeyboardShortcutsAction,
-        ZoomInAction, ZoomOneAction, ZoomOutAction,
+        PreferencesAction, PreviousTabAction, SearchAction, SetTitleAction,
+        ShowKeyboardShortcutsAction, ZoomInAction, ZoomOneAction, ZoomOutAction,
     };
     use relm4::actions::ActionName;
 
@@ -409,6 +411,7 @@ mod tests {
                 ShowKeyboardShortcutsAction::action_name(),
             ),
             (key::SEARCH, SearchAction::action_name()),
+            (key::SET_TITLE, SetTitleAction::action_name()),
             (key::ZOOM_IN, ZoomInAction::action_name()),
             (key::ZOOM_ONE, ZoomOneAction::action_name()),
             (key::ZOOM_OUT, ZoomOutAction::action_name()),

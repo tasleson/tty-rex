@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::{gio, glib};
+use relm4::actions::RelmAction;
 use relm4::prelude::*;
 use vte::prelude::*;
 
@@ -38,6 +39,8 @@ use crate::profile::Profile;
 use crate::settings::{self, AppSettings, ExitAction};
 use crate::spawn::{ChildExit, SpawnError, SpawnRequest, Spawner};
 use crate::terminal::{self, ZoomLevel};
+use crate::title_dialog::{SET_TITLE_LABEL, TitleDialog};
+use crate::window::SetTitleAction;
 
 /// Exits faster than this without user input are treated as failures so the
 /// error stays visible (see `ptyxis_tab_wait_cb()`).
@@ -110,6 +113,11 @@ pub fn should_ignore_osc_title(ignore_setting: bool, title_prefix: Option<&str>)
     ignore_setting || title_prefix.is_some_and(|prefix| !prefix.is_empty())
 }
 
+/// An empty prefix means none, as in `ptyxis_tab_set_title_prefix()`.
+pub fn normalize_title_prefix(prefix: Option<String>) -> Option<String> {
+    prefix.filter(|prefix| !prefix.is_empty())
+}
+
 /// Builds the tab title like `ptyxis_tab_dup_title()`.
 pub fn compose_title(
     prefix: Option<&str>,
@@ -153,6 +161,9 @@ fn context_menu() -> gio::Menu {
         item.set_action_and_target_value(Some("terminal.select-all"), Some(&select.to_variant()));
         section.append_item(&item);
     }
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    section.append_item(&RelmAction::<SetTitleAction>::to_menu_item(SET_TITLE_LABEL));
     menu.append_section(None, &section);
     let section = gio::Menu::new();
     section.append(Some("_Inspect Terminal"), Some("tab.inspect"));
@@ -227,6 +238,13 @@ pub enum TabInput {
     Focus,
     Inspect,
     InspectorClosed,
+    ShowTitleDialog,
+    SetTitlePrefix(String),
+    SetIncludeProcessTitle(bool),
+    /// Carries the serial of the dialog that closed.
+    TitleDialogClosed(u32),
+    /// The tab left its window, e.g. to move to another one.
+    Unrealized,
 }
 
 pub struct Tab {
@@ -237,6 +255,11 @@ pub struct Tab {
     initial_cwd_uri: Option<String>,
     previous_cwd_uri: Option<String>,
     title_prefix: Option<String>,
+    /// Per tab like the C `ignore-osc-title` property, so the title dialog
+    /// can change it without touching the setting.
+    ignore_osc_title: bool,
+    /// The `ignore-osc-title` setting last applied to `ignore_osc_title`.
+    ignore_osc_title_setting: bool,
     zoom: Rc<Cell<ZoomLevel>>,
     state: TabState,
     spawned_at: Instant,
@@ -247,6 +270,10 @@ pub struct Tab {
     /// Handlers on objects shared with other tabs, disconnected on shutdown.
     shared_handlers: Vec<(glib::Object, glib::SignalHandlerId)>,
     inspector: Option<Controller<Inspector>>,
+    title_dialog: Option<TitleDialog>,
+    /// Identifies the current title dialog, so a late "closed" message from
+    /// a dialog that was force-closed cannot clear its successor.
+    title_dialog_serial: u32,
 }
 
 impl Tab {
@@ -257,10 +284,7 @@ impl Tab {
     fn title(&self) -> String {
         compose_title(
             self.title_prefix.as_deref(),
-            should_ignore_osc_title(
-                self.app_settings.ignore_osc_title(),
-                self.title_prefix.as_deref(),
-            ),
+            self.ignore_osc_title,
             terminal::window_title(&self.terminal).as_deref(),
             self.command
                 .as_ref()
@@ -402,6 +426,10 @@ impl Component for Tab {
         // The page only exists once the window has inserted us.
         let input = sender.input_sender().clone();
         root.connect_parent_notify(move |_| input.emit(TabInput::UpdateTitle));
+        // Moving to another window unrealizes the tab; libadwaita reparents
+        // an internal wrapper, so the tab's own parent does not change.
+        let input = sender.input_sender().clone();
+        root.connect_unrealize(move |_| input.emit(TabInput::Unrealized));
 
         let input = sender.input_sender().clone();
         init.profile
@@ -437,6 +465,8 @@ impl Component for Tab {
             terminal.set_size(columns.into(), rows.into());
         }
 
+        let title_prefix = normalize_title_prefix(init.title_prefix);
+        let ignore_osc_title_setting = init.app_settings.ignore_osc_title();
         let mut model = Tab {
             profile: init.profile,
             app_settings: init.app_settings,
@@ -444,7 +474,12 @@ impl Component for Tab {
             command: init.command,
             initial_cwd_uri: init.initial_cwd_uri,
             previous_cwd_uri: init.previous_cwd_uri,
-            title_prefix: init.title_prefix.filter(|p| !p.is_empty()),
+            ignore_osc_title: should_ignore_osc_title(
+                ignore_osc_title_setting,
+                title_prefix.as_deref(),
+            ),
+            ignore_osc_title_setting,
+            title_prefix,
             zoom: init.zoom,
             state: TabState::Initial,
             spawned_at: Instant::now(),
@@ -453,6 +488,8 @@ impl Component for Tab {
             banner,
             banner_action: BannerAction::Restart,
             inspector: None,
+            title_dialog: None,
+            title_dialog_serial: 0,
             shared_handlers,
         };
         model.respawn(&sender);
@@ -491,6 +528,16 @@ impl Component for Tab {
             TabInput::UpdateTitle => {}
             TabInput::AppSettingsChanged => {
                 terminal::apply_app_settings(&self.terminal, &self.app_settings);
+                // Like the C property binding, only a change of the setting
+                // itself overrides the tab's choice.
+                let setting = self.app_settings.ignore_osc_title();
+                if setting != self.ignore_osc_title_setting {
+                    self.ignore_osc_title_setting = setting;
+                    self.ignore_osc_title = setting;
+                    if let Some(dialog) = &self.title_dialog {
+                        dialog.set_include_process_title(!setting);
+                    }
+                }
             }
             TabInput::ProfileChanged => {
                 terminal::apply_profile(&self.terminal, &self.profile);
@@ -535,6 +582,45 @@ impl Component for Tab {
                 self.inspector = Some(inspector);
             }
             TabInput::InspectorClosed => self.inspector = None,
+            TabInput::ShowTitleDialog => {
+                // One dialog per tab: while it is open a further request
+                // (e.g. its shortcut) does nothing.
+                if self.title_dialog.is_some() {
+                    return;
+                }
+                self.title_dialog_serial = self.title_dialog_serial.wrapping_add(1);
+                let serial = self.title_dialog_serial;
+                let prefix = sender.input_sender().clone();
+                let include = sender.input_sender().clone();
+                let closed = sender.input_sender().clone();
+                let dialog = TitleDialog::new(
+                    self.title_prefix.as_deref().unwrap_or_default(),
+                    !self.ignore_osc_title,
+                    move |text| prefix.emit(TabInput::SetTitlePrefix(text)),
+                    move |active| include.emit(TabInput::SetIncludeProcessTitle(active)),
+                    move || closed.emit(TabInput::TitleDialogClosed(serial)),
+                );
+                dialog.present(root);
+                self.title_dialog = Some(dialog);
+            }
+            TabInput::SetTitlePrefix(prefix) => {
+                self.title_prefix = normalize_title_prefix(Some(prefix));
+            }
+            TabInput::SetIncludeProcessTitle(include) => self.ignore_osc_title = !include,
+            TabInput::TitleDialogClosed(serial) => {
+                if serial == self.title_dialog_serial {
+                    self.title_dialog = None;
+                }
+            }
+            TabInput::Unrealized => {
+                // A tab moved to another window (e.g. by the detach-tab
+                // shortcut, which the dialog does not block) would leave its
+                // dialog on the old window, which may never report "closed"
+                // once destroyed.
+                if let Some(dialog) = self.title_dialog.take() {
+                    dialog.force_close();
+                }
+            }
             TabInput::Focus => {
                 self.terminal.grab_focus();
             }
@@ -547,6 +633,9 @@ impl Component for Tab {
         // The inspector describes this terminal, so it goes with the tab.
         if let Some(inspector) = self.inspector.take() {
             inspector.widget().destroy();
+        }
+        if let Some(dialog) = self.title_dialog.take() {
+            dialog.force_close();
         }
         for (object, id) in self.shared_handlers.drain(..) {
             object.disconnect(id);
@@ -602,6 +691,22 @@ mod tests {
         ];
         for (setting, prefix, expected) in cases {
             assert_eq!(should_ignore_osc_title(setting, prefix), expected);
+        }
+    }
+
+    #[test]
+    fn title_prefixes() {
+        let cases = [
+            (None, None),
+            (Some(""), None),
+            (Some("Logs: "), Some("Logs: ")),
+        ];
+        for (prefix, expected) in cases {
+            assert_eq!(
+                normalize_title_prefix(prefix.map(str::to_owned)).as_deref(),
+                expected,
+                "{prefix:?}"
+            );
         }
     }
 
