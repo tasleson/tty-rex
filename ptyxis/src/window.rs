@@ -35,6 +35,7 @@ use vte::prelude::*;
 
 use crate::app::{App, TabRequest};
 use crate::config;
+use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
 use crate::settings::NewTabPosition;
 use crate::terminal;
 
@@ -61,6 +62,7 @@ relm4::new_stateless_action!(pub PasteAction, WindowActions, "paste-clipboard");
 relm4::new_stateless_action!(pub ZoomInAction, WindowActions, "zoom-in");
 relm4::new_stateless_action!(pub ZoomOutAction, WindowActions, "zoom-out");
 relm4::new_stateless_action!(pub ZoomOneAction, WindowActions, "zoom-one");
+relm4::new_stateless_action!(pub SearchAction, WindowActions, "search");
 
 pub struct WindowInit {
     pub app: Rc<App>,
@@ -84,6 +86,8 @@ pub enum WindowInput {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    ShowFind,
+    FindDismissed,
     SelectedPageChanged,
     PageDetached {
         child: gtk::Widget,
@@ -98,6 +102,8 @@ pub struct Window {
     tab_view: adw::TabView,
     window_title: adw::WindowTitle,
     title_bindings: glib::BindingGroup,
+    find_bar: Controller<FindBar>,
+    find_bar_revealer: gtk::Revealer,
     cwd_handler: Option<(vte::Terminal, glib::SignalHandlerId)>,
 }
 
@@ -192,14 +198,19 @@ impl Window {
         if let Some((terminal, id)) = self.cwd_handler.take() {
             terminal.disconnect(id);
         }
+        let tab = page.as_ref().and_then(|page| self.app.tab(&page.child()));
+        self.find_bar.emit(FindBarInput::SetTerminal(
+            tab.as_ref().map(|t| t.terminal.clone()),
+        ));
         let Some(page) = page else {
+            self.find_bar_revealer.set_reveal_child(false);
             self.window_title.set_title(config::APP_NAME);
             self.window_title.set_subtitle("");
             return;
         };
         page.set_needs_attention(false);
 
-        let Some(tab) = self.app.tab(&page.child()) else {
+        let Some(tab) = tab else {
             return;
         };
         let window_title = self.window_title.clone();
@@ -290,8 +301,21 @@ impl Component for Window {
             .build();
         header.pack_end(&primary_menu_button);
 
+        let find_bar = FindBar::builder()
+            .launch(())
+            .forward(sender.input_sender(), |output| match output {
+                FindBarOutput::Dismissed => WindowInput::FindDismissed,
+            });
+        // No transition: VTE does not resize gracefully during one.
+        let find_bar_revealer = gtk::Revealer::builder()
+            .reveal_child(false)
+            .transition_duration(0)
+            .child(find_bar.widget())
+            .build();
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&tab_view);
+        content.append(&find_bar_revealer);
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header);
@@ -330,6 +354,7 @@ impl Component for Window {
         add_action::<ZoomInAction>(&mut actions, &sender, || WindowInput::ZoomIn);
         add_action::<ZoomOutAction>(&mut actions, &sender, || WindowInput::ZoomOut);
         add_action::<ZoomOneAction>(&mut actions, &sender, || WindowInput::ZoomReset);
+        add_action::<SearchAction>(&mut actions, &sender, || WindowInput::ShowFind);
         actions.register_for_widget(&window);
 
         let input = sender.input_sender().clone();
@@ -373,6 +398,8 @@ impl Component for Window {
             tab_view,
             window_title,
             title_bindings,
+            find_bar,
+            find_bar_revealer,
             cwd_handler: None,
         };
         ComponentParts { model, widgets: () }
@@ -408,6 +435,16 @@ impl Component for Window {
             WindowInput::ZoomIn => self.send_to_active_tab(TabInput::ZoomIn),
             WindowInput::ZoomOut => self.send_to_active_tab(TabInput::ZoomOut),
             WindowInput::ZoomReset => self.send_to_active_tab(TabInput::ZoomReset),
+            WindowInput::ShowFind => {
+                if self.tab_view.selected_page().is_some() {
+                    self.find_bar_revealer.set_reveal_child(true);
+                    self.find_bar.emit(FindBarInput::Focus);
+                }
+            }
+            WindowInput::FindDismissed => {
+                self.find_bar_revealer.set_reveal_child(false);
+                self.send_to_active_tab(TabInput::Focus);
+            }
             WindowInput::SelectedPageChanged => self.on_selected_page_changed(),
             WindowInput::PageDetached {
                 child,

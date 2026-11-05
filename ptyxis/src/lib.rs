@@ -36,6 +36,7 @@
 
 pub mod app;
 pub mod config;
+pub mod find_bar;
 pub mod palette;
 pub mod profile;
 pub mod settings;
