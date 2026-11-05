@@ -109,7 +109,7 @@ impl Profile {
         let path = config::profile_settings_path(uuid);
         Ok(Self {
             uuid: uuid.to_owned(),
-            settings: settings::open(config::PROFILE_SCHEMA_ID, Some(&path))?,
+            settings: settings::open(config::PROFILE_SCHEMA_ID, Some(&path), key::ALL)?,
         })
     }
 

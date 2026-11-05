@@ -82,6 +82,11 @@ pub enum SettingsError {
          GSETTINGS_SCHEMA_DIR to a directory containing the compiled schema"
     )]
     MissingSchema(String),
+    #[error(
+        "GSettings schema \"{schema_id}\" has no key \"{key}\"; the installed \
+         schema is probably older than this build"
+    )]
+    MissingKey { schema_id: String, key: String },
 }
 
 /// Returns the schema source to resolve Ptyxis schemas from.
@@ -300,7 +305,7 @@ pub struct AppSettings {
 
 impl AppSettings {
     pub fn new() -> Result<Self, SettingsError> {
-        let settings = open(config::SCHEMA_ID, None)?;
+        let settings = open(config::SCHEMA_ID, None, key::ALL)?;
         // The desktop schema is optional (e.g. non-GNOME sessions).
         let desktop = gio::SettingsSchemaSource::default()
             .and_then(|source| source.lookup(DESKTOP_INTERFACE_SCHEMA_ID, true))
@@ -412,9 +417,23 @@ pub fn lookup_schema(schema_id: &str) -> Option<gio::SettingsSchema> {
 }
 
 /// Opens settings for `schema_id`, at `path` for relocatable schemas.
-pub fn open(schema_id: &str, path: Option<&str>) -> Result<gio::Settings, SettingsError> {
+///
+/// Reading a key the schema lacks aborts the process, which can happen
+/// when an older Ptyxis schema is picked up, so `required_keys` are checked
+/// up front and reported as an error instead.
+pub fn open(
+    schema_id: &str,
+    path: Option<&str>,
+    required_keys: &[&str],
+) -> Result<gio::Settings, SettingsError> {
     let schema =
         lookup_schema(schema_id).ok_or_else(|| SettingsError::MissingSchema(schema_id.into()))?;
+    if let Some(key) = required_keys.iter().find(|key| !schema.has_key(key)) {
+        return Err(SettingsError::MissingKey {
+            schema_id: schema_id.to_owned(),
+            key: (*key).to_owned(),
+        });
+    }
     Ok(gio::Settings::new_full(
         &schema,
         None::<&gio::SettingsBackend>,
@@ -587,7 +606,20 @@ mod tests {
 
     #[test]
     fn missing_schema_is_an_error() {
-        let err = open("org.gnome.Ptyxis.DoesNotExist", None).unwrap_err();
+        let err = open("org.gnome.Ptyxis.DoesNotExist", None, &[]).unwrap_err();
         assert!(err.to_string().contains("org.gnome.Ptyxis.DoesNotExist"));
+    }
+
+    #[test]
+    fn missing_key_is_an_error() {
+        if expected_schema(config::SCHEMA_ID).is_none() {
+            return;
+        }
+        let err = open(config::SCHEMA_ID, None, &[key::AUDIBLE_BELL, "no-such-key"]).unwrap_err();
+        assert!(
+            matches!(&err, SettingsError::MissingKey { key, .. } if key == "no-such-key"),
+            "{err}"
+        );
+        assert!(open(config::SCHEMA_ID, None, key::ALL).is_ok());
     }
 }

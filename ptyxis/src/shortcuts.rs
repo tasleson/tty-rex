@@ -76,9 +76,11 @@ pub struct Shortcuts {
 
 impl Shortcuts {
     pub fn new() -> Result<Self, SettingsError> {
+        let keys: Vec<&str> = BINDINGS.iter().map(|(key, _)| *key).collect();
         let settings = settings::open(
             config::SHORTCUTS_SCHEMA_ID,
             Some(config::SHORTCUTS_SCHEMA_PATH),
+            &keys,
         )?;
         let controller = gtk::ShortcutController::new();
         controller.set_propagation_phase(gtk::PropagationPhase::Capture);
