@@ -239,7 +239,7 @@ impl FaceReader<'_> {
     fn optional(&self, key: &str) -> Result<Option<gdk::RGBA>, PaletteError> {
         Ok(self.parse(key).and_then(|result| {
             result
-                .inspect_err(|e| glib::g_warning!("Ptyxis", "{e}; using the default"))
+                .inspect_err(|e| glib::g_warning!("tty-rex", "{e}; using the default"))
                 .ok()
         }))
     }
@@ -450,7 +450,7 @@ fn lookup_user(id: &str) -> Option<Palette> {
             let path = dir.join(format!("{id}{PALETTE_SUFFIX}"));
             let data = std::fs::read_to_string(&path).ok()?;
             Palette::parse(id, &path.display().to_string(), &data)
-                .inspect_err(|e| glib::g_warning!("Ptyxis", "Ignoring user palette: {e}"))
+                .inspect_err(|e| glib::g_warning!("tty-rex", "Ignoring user palette: {e}"))
                 .ok()
         })
 }
@@ -468,7 +468,7 @@ fn lookup_builtin(id: &str) -> Option<Palette> {
         return Some(palette);
     }
     let palette = Palette::parse(id, id, data)
-        .inspect_err(|e| glib::g_critical!("Ptyxis", "Bundled palette is invalid: {e}"))
+        .inspect_err(|e| glib::g_critical!("tty-rex", "Bundled palette is invalid: {e}"))
         .ok()?;
     CACHE.with_borrow_mut(|cache| cache.insert(builtin_id, palette.clone()));
     Some(palette)
@@ -500,7 +500,7 @@ fn user_palettes() -> Vec<Palette> {
                     palettes.push(palette)
                 }
                 Ok(_) => {}
-                Err(e) => glib::g_warning!("Ptyxis", "Ignoring user palette: {e}"),
+                Err(e) => glib::g_warning!("tty-rex", "Ignoring user palette: {e}"),
             }
         }
     }

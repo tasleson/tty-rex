@@ -269,7 +269,7 @@ impl Profile {
         let value = self.settings.value(key::CUSTOM_LINKS);
         custom_links_from_variant(&value).unwrap_or_else(|| {
             glib::g_warning!(
-                "Ptyxis",
+                "tty-rex",
                 "Invalid variant type for custom-links: {}",
                 value.type_()
             );
@@ -324,7 +324,7 @@ impl Profiles {
             .filter_map(|uuid| {
                 Profile::open(uuid)
                     .inspect_err(|e| {
-                        glib::g_warning!("Ptyxis", "Failed to open profile {uuid}: {e}")
+                        glib::g_warning!("tty-rex", "Failed to open profile {uuid}: {e}")
                     })
                     .ok()
             })
@@ -350,7 +350,7 @@ impl Profiles {
             .set_profile_uuids(&uuids)
             .and_then(|()| self.app_settings.set_default_profile_uuid(&uuid))
         {
-            glib::g_warning!("Ptyxis", "Failed to save new default profile: {e}");
+            glib::g_warning!("tty-rex", "Failed to save new default profile: {e}");
         }
         Ok(profile)
     }

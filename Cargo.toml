@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["ptyxis"]
+members = ["tty-rex"]
 
 [workspace.package]
 edition = "2024"

@@ -180,7 +180,7 @@ impl AccelDialog {
 
     fn save(&self, accelerator: &str, root: &adw::Dialog) {
         if let Err(e) = self.settings.set_string(self.key, accelerator) {
-            glib::g_warning!("Ptyxis", "Failed to save shortcut {}: {e}", self.key);
+            glib::g_warning!("tty-rex", "Failed to save shortcut {}: {e}", self.key);
         }
         root.close();
     }

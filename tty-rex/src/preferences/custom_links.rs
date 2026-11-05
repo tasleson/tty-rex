@@ -275,7 +275,7 @@ impl CustomLinksGroup {
         };
         // Writing emits changed::custom-links, which syncs (as a no-op).
         if let Err(e) = profile.set_custom_links(&links) {
-            glib::g_warning!("Ptyxis", "Failed to save custom links: {e}");
+            glib::g_warning!("tty-rex", "Failed to save custom links: {e}");
         }
     }
 

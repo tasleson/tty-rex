@@ -131,7 +131,7 @@ pub fn apply_profile_palette(terminal: &vte::Terminal, profile: &Profile) {
             let dark = adw::StyleManager::default().is_dark();
             apply_palette(terminal, &palette, dark);
         }
-        None => glib::g_warning!("Ptyxis", "No palette available for “{palette_id}”"),
+        None => glib::g_warning!("tty-rex", "No palette available for “{palette_id}”"),
     }
 }
 

@@ -18,5 +18,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 fn main() -> gtk::glib::ExitCode {
-    ptyxis::app::run()
+    tty_rex::app::run()
 }

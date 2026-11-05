@@ -20,16 +20,16 @@
 //! Build-time identifiers shared with the C implementation (see the
 //! toplevel `meson.build` and `src/meson.build`).
 
-/// The application id. Uninstalled builds default to the development id so
-/// they never take over a running stable instance; packagers can override it
-/// with `PTYXIS_APP_ID` at build time.
-pub const APP_ID: &str = match option_env!("PTYXIS_APP_ID") {
+/// The application id, distinct from Ptyxis's so the two never hand
+/// launches to each other. Override it with `TTY_REX_APP_ID` at build time,
+/// e.g. with an id ending in `.Devel` for development builds.
+pub const APP_ID: &str = match option_env!("TTY_REX_APP_ID") {
     Some(id) => id,
-    None => "org.gnome.Ptyxis.Devel",
+    None => "io.github.tasleson.TtyRex",
 };
 
-/// Displayed application name.
-pub const APP_NAME: &str = "Ptyxis";
+/// Displayed application name and program name.
+pub const APP_NAME: &str = "tty-rex";
 
 /// Version advertised to child processes via `PTYXIS_VERSION`.
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -123,17 +123,17 @@ const PARAMETER_STRING: &str = "[-- COMMAND ARGUMENTS]";
 const SUMMARY: &str = "Examples:
 
   Run Separate Instance
-    ptyxis -s
+    tty-rex -s
 
   Open Preferences
-    ptyxis --preferences
+    tty-rex --preferences
 
   Run Custom Command in New Window
-    ptyxis -x \"bash -c 'sleep 3'\"
-    ptyxis -- bash -c 'sleep 3'
+    tty-rex -x \"bash -c 'sleep 3'\"
+    tty-rex -- bash -c 'sleep 3'
 
   Import a custom palette
-    ptyxis --import-palette my.palette";
+    tty-rex --import-palette my.palette";
 
 /// Registers the supported options on the application.
 pub fn register_options(application: &impl IsA<gio::Application>) {
@@ -371,40 +371,40 @@ mod tests {
     #[test]
     fn early_args() {
         let cases: &[(&[&str], &[&str], bool)] = &[
-            (&["ptyxis"], &["ptyxis"], false),
-            (&["ptyxis", "-s"], &["ptyxis", "-s"], true),
-            (&["ptyxis", "-x", "top"], &["ptyxis", "-x", "top"], true),
+            (&["tty-rex"], &["tty-rex"], false),
+            (&["tty-rex", "-s"], &["tty-rex", "-s"], true),
+            (&["tty-rex", "-x", "top"], &["tty-rex", "-x", "top"], true),
             (
-                &["ptyxis", "--execute=top"],
-                &["ptyxis", "--execute=top"],
+                &["tty-rex", "--execute=top"],
+                &["tty-rex", "--execute=top"],
                 true,
             ),
             (
-                &["ptyxis", "--tab", "-x", "top"],
-                &["ptyxis", "--tab", "-x", "top"],
+                &["tty-rex", "--tab", "-x", "top"],
+                &["tty-rex", "--tab", "-x", "top"],
                 false,
             ),
             (
-                &["ptyxis", "--", "bash", "-c", "sleep 3"],
-                &["ptyxis", "-x", "'bash' '-c' 'sleep 3'"],
+                &["tty-rex", "--", "bash", "-c", "sleep 3"],
+                &["tty-rex", "-x", "'bash' '-c' 'sleep 3'"],
                 true,
             ),
             (
-                &["ptyxis", "-e", "vim", "my file"],
-                &["ptyxis", "-x", "'vim' 'my file'"],
+                &["tty-rex", "-e", "vim", "my file"],
+                &["tty-rex", "-x", "'vim' 'my file'"],
                 true,
             ),
             (
-                &["ptyxis", "--new-window", "--", "htop"],
-                &["ptyxis", "--new-window", "-x", "'htop'"],
+                &["tty-rex", "--new-window", "--", "htop"],
+                &["tty-rex", "--new-window", "-x", "'htop'"],
                 false,
             ),
             (
-                &["ptyxis", "--tab-with-profile=abc", "--", "htop"],
-                &["ptyxis", "--tab-with-profile=abc", "-x", "'htop'"],
+                &["tty-rex", "--tab-with-profile=abc", "--", "htop"],
+                &["tty-rex", "--tab-with-profile=abc", "-x", "'htop'"],
                 false,
             ),
-            (&["ptyxis", "--"], &["ptyxis", "--"], false),
+            (&["tty-rex", "--"], &["tty-rex", "--"], false),
         ];
         for (input, args, standalone) in cases {
             let early = preprocess_args(strings(input));
@@ -417,21 +417,21 @@ mod tests {
     fn import_palette_is_extracted() {
         let cases: &[(&[&str], &[&str], Option<&str>)] = &[
             (
-                &["ptyxis", "--import-palette", "a.palette"],
-                &["ptyxis"],
+                &["tty-rex", "--import-palette", "a.palette"],
+                &["tty-rex"],
                 Some("a.palette"),
             ),
             (
-                &["ptyxis", "--import-palette=b.palette", "-s"],
-                &["ptyxis", "-s"],
+                &["tty-rex", "--import-palette=b.palette", "-s"],
+                &["tty-rex", "-s"],
                 Some("b.palette"),
             ),
             (
-                &["ptyxis", "--", "echo", "--import-palette"],
-                &["ptyxis", "-x", "'echo' '--import-palette'"],
+                &["tty-rex", "--", "echo", "--import-palette"],
+                &["tty-rex", "-x", "'echo' '--import-palette'"],
                 None,
             ),
-            (&["ptyxis", "--tab"], &["ptyxis", "--tab"], None),
+            (&["tty-rex", "--tab"], &["tty-rex", "--tab"], None),
         ];
         for (input, args, palette) in cases {
             let early = preprocess_args(strings(input));

@@ -157,7 +157,7 @@ impl Preferences {
         let profile = match self.profiles.default_profile() {
             Ok(profile) => profile,
             Err(e) => {
-                glib::g_warning!("Ptyxis", "Cannot edit the default profile: {e}");
+                glib::g_warning!("tty-rex", "Cannot edit the default profile: {e}");
                 return;
             }
         };
@@ -212,7 +212,7 @@ impl Preferences {
         let profile = match Profile::open(uuid) {
             Ok(profile) => profile,
             Err(e) => {
-                glib::g_warning!("Ptyxis", "Cannot edit profile {uuid}: {e}");
+                glib::g_warning!("tty-rex", "Cannot edit profile {uuid}: {e}");
                 return;
             }
         };
@@ -259,7 +259,7 @@ impl Preferences {
                     if !name.is_empty()
                         && let Err(e) = gsettings.set_string(key::FONT_NAME, &name)
                     {
-                        glib::g_warning!("Ptyxis", "Failed to save font: {e}");
+                        glib::g_warning!("tty-rex", "Failed to save font: {e}");
                     }
                 }
             },
@@ -354,7 +354,7 @@ fn profile_row(
             "make-default",
             Box::new(move || {
                 if let Err(e) = profiles.set_default(&uuid) {
-                    glib::g_warning!("Ptyxis", "Failed to set default profile: {e}");
+                    glib::g_warning!("tty-rex", "Failed to set default profile: {e}");
                 }
             }),
         )
@@ -367,7 +367,7 @@ fn profile_row(
             "duplicate",
             Box::new(move || {
                 if let Err(e) = profiles.duplicate(&profile) {
-                    glib::g_warning!("Ptyxis", "Failed to duplicate profile: {e}");
+                    glib::g_warning!("tty-rex", "Failed to duplicate profile: {e}");
                 }
             }),
         );
@@ -393,7 +393,7 @@ fn profile_row(
                 let toast = profile_editor::removal_toast(&profiles, &profile);
                 match profiles.remove(profile.uuid()) {
                     Ok(()) => widgets::add_toast(&row, toast),
-                    Err(e) => glib::g_warning!("Ptyxis", "Failed to remove profile: {e}"),
+                    Err(e) => glib::g_warning!("tty-rex", "Failed to remove profile: {e}"),
                 }
             }),
         );
@@ -586,7 +586,7 @@ impl Component for Preferences {
         let custom_links = init
             .profiles
             .default_profile()
-            .inspect_err(|e| glib::g_warning!("Ptyxis", "Cannot load custom links: {e}"))
+            .inspect_err(|e| glib::g_warning!("tty-rex", "Cannot load custom links: {e}"))
             .ok()
             .map(|profile| CustomLinksGroup::new(&profile));
         if let Some(links) = &custom_links {
@@ -596,7 +596,7 @@ impl Component for Preferences {
 
         // Shortcuts
         let shortcut_settings = shortcuts::open_settings()
-            .inspect_err(|e| glib::g_warning!("Ptyxis", "Shortcut settings unavailable: {e}"))
+            .inspect_err(|e| glib::g_warning!("tty-rex", "Shortcut settings unavailable: {e}"))
             .ok();
         if let Some(settings) = &shortcut_settings {
             root.add(&shortcuts_page(settings, input));
@@ -645,7 +645,7 @@ impl Component for Preferences {
                     gio::File::for_path(&dir)
                         .monitor_directory(gio::FileMonitorFlags::NONE, None::<&gio::Cancellable>)
                         .inspect_err(|e| {
-                            glib::g_warning!("Ptyxis", "Cannot watch {}: {e}", dir.display())
+                            glib::g_warning!("tty-rex", "Cannot watch {}: {e}", dir.display())
                         })
                         .ok()
                 })
@@ -729,7 +729,7 @@ impl Component for Preferences {
             }
             PreferencesInput::AddProfile => {
                 if let Err(e) = self.profiles.create() {
-                    glib::g_warning!("Ptyxis", "Failed to add profile: {e}");
+                    glib::g_warning!("tty-rex", "Failed to add profile: {e}");
                 }
             }
             PreferencesInput::EditProfile(uuid) => self.edit_profile(root, &uuid),
@@ -896,7 +896,7 @@ fn font_group(
 fn window_group(settings: &gio::Settings) -> adw::PreferencesGroup {
     let restore_session = widgets::switch_row(
         "Restore Session",
-        Some("Attempt to restore previous tabs when Ptyxis starts"),
+        Some("Attempt to restore previous tabs when tty-rex starts"),
     );
     widgets::bind(settings, key::RESTORE_SESSION, &restore_session, "active");
 
@@ -940,7 +940,7 @@ fn palette_drop_target() -> gtk::DropTarget {
         };
         let dir = palette::import_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            glib::g_warning!("Ptyxis", "Cannot create {}: {e}", dir.display());
+            glib::g_warning!("tty-rex", "Cannot create {}: {e}", dir.display());
             return false;
         }
         for file in files.files() {
@@ -959,7 +959,7 @@ fn palette_drop_target() -> gtk::DropTarget {
                 None,
                 |result| {
                     if let Err(e) = result {
-                        glib::g_warning!("Ptyxis", "Failed to import palette: {e}");
+                        glib::g_warning!("tty-rex", "Failed to import palette: {e}");
                     }
                 },
             );

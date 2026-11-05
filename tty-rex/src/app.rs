@@ -51,7 +51,7 @@ static RESOURCES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ptyxis.greso
 fn register_resources() {
     match gio::Resource::from_data(&glib::Bytes::from_static(RESOURCES)) {
         Ok(resource) => gio::resources_register(&resource),
-        Err(e) => glib::g_warning!("Ptyxis", "Bundled icons are unavailable: {e}"),
+        Err(e) => glib::g_warning!("tty-rex", "Bundled icons are unavailable: {e}"),
     }
 }
 
@@ -302,7 +302,7 @@ impl App {
                 .detach();
             // Like the C window it gets its own window group so it stacks
             // independently of terminal windows, and keeps the application
-            // running on its own (e.g. `ptyxis --preferences`).
+            // running on its own (e.g. `tty-rex --preferences`).
             gtk::WindowGroup::new().add_window(controller.widget());
             self.application.add_window(controller.widget());
             controller
@@ -426,7 +426,7 @@ fn rebuild_profile_menu(app: &Weak<App>) {
 
 /// Runs the application with the process arguments and returns its exit code.
 pub fn run() -> glib::ExitCode {
-    glib::set_prgname(Some("ptyxis"));
+    glib::set_prgname(Some(config::APP_NAME));
     glib::set_application_name(config::APP_NAME);
 
     let early = cli::preprocess_args(std::env::args().collect());
@@ -469,7 +469,7 @@ pub fn run() -> glib::ExitCode {
             match App::new(application) {
                 Ok(app) => *state.borrow_mut() = Some(app),
                 Err(e) => {
-                    eprintln!("ptyxis: {e}");
+                    eprintln!("{}: {e}", config::APP_NAME);
                     failed.set(true);
                     application.quit();
                 }

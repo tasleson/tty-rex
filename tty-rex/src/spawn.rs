@@ -289,7 +289,7 @@ async fn host_shell_info() -> HostShellInfo {
     let info = gio::spawn_blocking(discover_host_shell_info)
         .await
         .unwrap_or_else(|_| {
-            glib::g_warning!("Ptyxis", "Shell discovery failed; using fallback shell");
+            glib::g_warning!("tty-rex", "Shell discovery failed; using fallback shell");
             HostShellInfo::default()
         });
     INFO.with(|cell| cell.get_or_init(|| info).clone())

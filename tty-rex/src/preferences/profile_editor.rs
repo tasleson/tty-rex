@@ -229,7 +229,7 @@ impl Component for ProfileEditor {
             ProfileEditorInput::Delete => {
                 let toast = removal_toast(&self.profiles, &self.profile);
                 if let Err(e) = self.profiles.remove(self.profile.uuid()) {
-                    glib::g_warning!("Ptyxis", "Failed to remove profile: {e}");
+                    glib::g_warning!("tty-rex", "Failed to remove profile: {e}");
                     return;
                 }
                 widgets::add_toast(root, toast);
@@ -260,7 +260,7 @@ pub fn removal_toast(profiles: &Profiles, profile: &Profile) -> adw::Toast {
         &format!("Removed profile “{}”", profile.label()),
         move || {
             if let Err(e) = profiles.add(&uuid) {
-                glib::g_warning!("Ptyxis", "Failed to restore profile: {e}");
+                glib::g_warning!("tty-rex", "Failed to restore profile: {e}");
             }
         },
     )

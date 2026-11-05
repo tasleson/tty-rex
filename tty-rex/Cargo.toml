@@ -1,6 +1,6 @@
 [package]
-name = "ptyxis"
-description = "A container-oriented terminal for GNOME (Rust port)"
+name = "tty-rex"
+description = "A Rust port of the Ptyxis terminal for GNOME"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

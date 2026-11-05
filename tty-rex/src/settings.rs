@@ -127,7 +127,7 @@ fn create_schema_source() -> Option<gio::SettingsSchemaSource> {
     match gio::SettingsSchemaSource::from_directory(dir, default.as_ref(), true) {
         Ok(source) => Some(source),
         Err(e) => {
-            glib::g_warning!("Ptyxis", "Ignoring build schema directory {dir}: {e}");
+            glib::g_warning!("tty-rex", "Ignoring build schema directory {dir}: {e}");
             default
         }
     }

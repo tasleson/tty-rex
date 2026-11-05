@@ -227,7 +227,7 @@ impl Window {
 
     fn add_tab(&mut self, request: TabRequest) {
         if let Err(e) = insert_tab(&self.app, &self.tab_view, request) {
-            glib::g_critical!("Ptyxis", "Failed to create tab: {e}");
+            glib::g_critical!("tty-rex", "Failed to create tab: {e}");
             if self.tab_view.n_pages() == 0 {
                 self.window.destroy();
             }
@@ -403,7 +403,7 @@ fn add_theme_controls(
             return;
         };
         if let Err(e) = gsettings.set_string(crate::settings::key::INTERFACE_STYLE, style.nick()) {
-            glib::g_warning!("Ptyxis", "Failed to save interface style: {e}");
+            glib::g_warning!("tty-rex", "Failed to save interface style: {e}");
         }
     });
     let weak_action = action.downgrade();
@@ -658,7 +658,7 @@ impl Component for Window {
                 let request = inherited_request(&app, &tab_view, None);
                 match insert_tab(&app, &tab_view, request) {
                     Ok(page) => return page,
-                    Err(e) => glib::g_critical!("Ptyxis", "Failed to create tab: {e}"),
+                    Err(e) => glib::g_critical!("tty-rex", "Failed to create tab: {e}"),
                 }
             }
             // The overview is only open while the window has tabs.
@@ -717,7 +717,7 @@ impl Component for Window {
 
         let shortcuts = Shortcuts::new()
             .inspect(|shortcuts| window.add_controller(shortcuts.controller().clone()))
-            .inspect_err(|e| glib::g_warning!("Ptyxis", "Keyboard shortcuts unavailable: {e}"))
+            .inspect_err(|e| glib::g_warning!("tty-rex", "Keyboard shortcuts unavailable: {e}"))
             .ok();
 
         let input = sender.input_sender().clone();

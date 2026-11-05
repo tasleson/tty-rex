@@ -379,7 +379,7 @@ fn populate(controller: &gtk::ShortcutController, settings: &gio::Settings) {
                 Some(trigger),
                 Some(gtk::NamedAction::new(action)),
             )),
-            None => glib::g_warning!("Ptyxis", "Ignoring invalid shortcut “{accel}” for {key}"),
+            None => glib::g_warning!("tty-rex", "Ignoring invalid shortcut “{accel}” for {key}"),
         }
     }
 }

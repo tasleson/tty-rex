@@ -101,7 +101,7 @@ fn generate_schema(src_dir: &Path, out_dir: &Path) {
         Ok(status) => println!("cargo::warning=glib-compile-schemas failed with {status}"),
         Err(e) => println!(
             "cargo::warning=could not run glib-compile-schemas: {e}; after installing it, \
-             run `cargo clean -p ptyxis` so the schema is compiled"
+             run `cargo clean -p tty-rex` so the schema is compiled"
         ),
     }
 }
@@ -193,7 +193,7 @@ fn generate_resources(src_dir: &Path, out_dir: &Path) {
         result => {
             println!(
                 "cargo::warning=glib-compile-resources failed ({result:?}); icons will be \
-                 missing. After installing it, run `cargo clean -p ptyxis`"
+                 missing. After installing it, run `cargo clean -p tty-rex`"
             );
             fs::write(&target, b"")
                 .unwrap_or_else(|e| panic!("failed to write {}: {e}", target.display()));

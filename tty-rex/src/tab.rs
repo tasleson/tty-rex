@@ -717,7 +717,7 @@ impl Component for Tab {
                 BannerAction::EditProfile => {
                     let uuid = self.profile.uuid().to_variant();
                     if let Err(e) = root.activate_action(EDIT_PROFILE_ACTION, Some(&uuid)) {
-                        glib::g_warning!("Ptyxis", "Cannot open the profile editor: {e}");
+                        glib::g_warning!("tty-rex", "Cannot open the profile editor: {e}");
                     }
                 }
             },

@@ -17,7 +17,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Rust port of the Ptyxis terminal.
+//! tty-rex, a Rust port of the Ptyxis terminal.
 //!
 //! # Building and running uninstalled
 //!
@@ -31,8 +31,8 @@
 //! `OUT_DIR`. The binary prefers that compiled schema automatically unless
 //! `GSETTINGS_SCHEMA_DIR` is set, so no installation step is needed. The
 //! schema id is the stable `org.gnome.Ptyxis` so existing profiles and
-//! shortcuts are used, while the application id defaults to
-//! `org.gnome.Ptyxis.Devel` to avoid talking to an installed instance.
+//! shortcuts are shared with Ptyxis, while the application id is
+//! `io.github.tasleson.TtyRex` so the two never hand launches to each other.
 
 pub mod app;
 pub mod choices;
