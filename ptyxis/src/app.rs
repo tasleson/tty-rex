@@ -44,6 +44,9 @@ use crate::tab::{Tab, TabInit, TabInput};
 use crate::terminal::ZoomLevel;
 use crate::window::{NewTabWithProfileAction, Window, WindowInit, WindowInput};
 
+/// The C build's stylesheet, shared so widgets ported from it look the same.
+const STYLESHEET: &str = include_str!("../../../src/style.css");
+
 /// Parameters for a new tab; unset fields use profile/settings defaults.
 #[derive(Debug, Clone, Default)]
 pub struct TabRequest {
@@ -355,6 +358,7 @@ pub fn run() -> glib::ExitCode {
         let failed = Rc::clone(&failed);
         move |application| {
             gtk::Window::set_default_icon_name(config::APP_ID);
+            relm4::set_global_css(STYLESHEET);
             match App::new(application) {
                 Ok(app) => *state.borrow_mut() = Some(app),
                 Err(e) => {
