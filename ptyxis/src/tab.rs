@@ -24,23 +24,26 @@
 //! reporting to a particular window, because pages can be dragged between
 //! windows; whichever window currently hosts the tab is the right one.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use relm4::actions::RelmAction;
 use relm4::prelude::*;
 use vte::prelude::*;
 
 use crate::inspector::{Inspector, InspectorInit};
+use crate::leader::{self, LeaderKind};
+use crate::palette::{self, Face};
 use crate::profile::Profile;
 use crate::settings::{self, AppSettings, ExitAction};
 use crate::spawn::{ChildExit, SpawnError, SpawnRequest, Spawner};
 use crate::terminal::{self, ZoomLevel};
 use crate::title_dialog::{SET_TITLE_LABEL, TitleDialog};
-use crate::window::SetTitleAction;
+use crate::window::{SetTitleAction, WINDOW_CONTENTS_CLASS};
 
 /// Exits faster than this without user input are treated as failures so the
 /// error stays visible (see `ptyxis_tab_wait_cb()`).
@@ -51,6 +54,15 @@ const RESTART_LABEL: &str = "_Restart";
 const EDIT_PROFILE_LABEL: &str = "Edit Profile";
 /// Application action opening the profile editor (`app.edit-profile`).
 pub const EDIT_PROFILE_ACTION: &str = "app.edit-profile";
+
+/// Poll delays of `src/ptyxis-tab-monitor.c`: soon after keys that likely
+/// start or end a program, otherwise backing off while nothing changes.
+const POLL_DELAY_INTERACTIVE: Duration = Duration::from_millis(100);
+const POLL_DELAY_MIN: Duration = Duration::from_millis(500);
+const POLL_DELAY_MAX: Duration = Duration::from_secs(10);
+
+/// Prefix of the CSS class that marks the window showing a given tab.
+const DRESSING_CLASS_PREFIX: &str = "ptyxis-tab-";
 
 /// What the banner button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +156,157 @@ pub fn compose_title(
     title
 }
 
+/// The CSS highlighting the window while `kind` leads the terminal, for the
+/// window carrying `css_class` (the superuser/remote rules of
+/// `ptyxis_window_dressing_update()`). Empty when there is nothing to show.
+pub fn leader_css(css_class: &str, kind: LeaderKind, face: &Face) -> String {
+    let scarf = match kind {
+        LeaderKind::Superuser => face.superuser,
+        LeaderKind::Remote => face.remote,
+        LeaderKind::Unknown | LeaderKind::Container => return String::new(),
+    };
+    let style = format!(
+        "{{ background-color: {}; color: {}; }}",
+        scarf.background, scarf.foreground
+    );
+    format!(
+        "window.{css_class} toolbarview.{WINDOW_CONTENTS_CLASS} > revealer.top-bar > windowhandle {style}\n\
+         window.{css_class} toolbarview.{WINDOW_CONTENTS_CLASS} headerbar {style}\n"
+    )
+}
+
+/// Whether a key press likely starts or ends a program, so the leader
+/// should be checked soon (`ptyxis_tab_monitor_key_pressed_cb()`).
+fn is_interactive_key(key: gdk::Key, state: gdk::ModifierType) -> bool {
+    let control = state.contains(gdk::ModifierType::CONTROL_MASK);
+    match key {
+        gdk::Key::Return | gdk::Key::ISO_Enter | gdk::Key::KP_Enter => true,
+        gdk::Key::c | gdk::Key::d => control,
+        _ => false,
+    }
+}
+
+/// Schedules checks of the foreground process like `PtyxisTabMonitor`:
+/// output and interactive keys bring the next check closer, while checks
+/// that find nothing new back off.
+struct LeaderMonitor {
+    delay: Cell<Duration>,
+    /// The scheduled check and when it is due.
+    pending: RefCell<Option<(glib::SourceId, Instant)>>,
+    stopped: Cell<bool>,
+    sender: relm4::Sender<TabInput>,
+}
+
+impl LeaderMonitor {
+    fn new(sender: relm4::Sender<TabInput>) -> Rc<Self> {
+        Rc::new(Self {
+            delay: Cell::new(POLL_DELAY_MIN),
+            pending: RefCell::default(),
+            stopped: Cell::new(false),
+            sender,
+        })
+    }
+
+    /// Checks after `delay`, unless a check is already due by then.
+    fn schedule(self: &Rc<Self>, delay: Duration) {
+        if self.stopped.get() {
+            return;
+        }
+        let due = Instant::now() + delay;
+        let mut pending = self.pending.borrow_mut();
+        if pending.as_ref().is_some_and(|(_, at)| *at <= due) {
+            return;
+        }
+        if let Some((id, _)) = pending.take() {
+            id.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(delay, move || {
+            if let Some(monitor) = weak.upgrade() {
+                // The source is gone once it fires; forget it unremoved.
+                monitor.pending.borrow_mut().take();
+                monitor.sender.emit(TabInput::PollLeader);
+            }
+        });
+        *pending = Some((id, due));
+    }
+
+    fn contents_changed(self: &Rc<Self>) {
+        if self.delay.get() > POLL_DELAY_MIN {
+            self.delay.set(POLL_DELAY_MIN);
+        }
+        self.schedule(self.delay.get());
+    }
+
+    fn interactive_key(self: &Rc<Self>) {
+        self.delay.set(POLL_DELAY_INTERACTIVE);
+        self.schedule(POLL_DELAY_INTERACTIVE);
+    }
+
+    /// Plans the next check after one finished.
+    fn polled(self: &Rc<Self>, changed: bool) {
+        let delay = if changed {
+            POLL_DELAY_MIN
+        } else {
+            (self.delay.get() * 2).clamp(POLL_DELAY_MIN, POLL_DELAY_MAX)
+        };
+        self.delay.set(delay);
+        self.schedule(delay);
+    }
+
+    fn stop(&self) {
+        self.stopped.set(true);
+        if let Some((id, _)) = self.pending.borrow_mut().take() {
+            id.remove();
+        }
+    }
+}
+
+/// A CSS provider coloring the window while this tab is the selected one.
+struct Dressing {
+    css_class: String,
+    provider: gtk::CssProvider,
+    /// The CSS last loaded, to skip needless restyling.
+    css: String,
+}
+
+impl Dressing {
+    fn new() -> Self {
+        static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+        let provider = gtk::CssProvider::new();
+        if let Some(display) = gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
+            );
+        }
+        Self {
+            css_class: format!(
+                "{DRESSING_CLASS_PREFIX}{}",
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ),
+            provider,
+            css: String::new(),
+        }
+    }
+
+    fn load(&mut self, css: String) {
+        if css != self.css {
+            self.provider.load_from_string(&css);
+            self.css = css;
+        }
+    }
+}
+
+impl Drop for Dressing {
+    fn drop(&mut self) {
+        if let Some(display) = gdk::Display::default() {
+            gtk::style_context_remove_provider_for_display(&display, &self.provider);
+        }
+    }
+}
+
 /// The terminal context menu: the items of `src/ptyxis-terminal.ui` whose
 /// actions the port implements.
 fn context_menu() -> gio::Menu {
@@ -225,6 +388,8 @@ pub enum TabInput {
     BannerClicked,
     Spawned(Result<glib::Pid, SpawnError>),
     Exited(ChildExit),
+    /// Time to check which process leads the terminal.
+    PollLeader,
     UpdateTitle,
     AppSettingsChanged,
     ProfileChanged,
@@ -274,11 +439,79 @@ pub struct Tab {
     /// Identifies the current title dialog, so a late "closed" message from
     /// a dialog that was force-closed cannot clear its successor.
     title_dialog_serial: u32,
+    leader_kind: LeaderKind,
+    /// Foreground process group seen by the last check.
+    leader_pgrp: Option<i32>,
+    leader_monitor: Rc<LeaderMonitor>,
+    dressing: Dressing,
 }
 
 impl Tab {
     pub fn terminal(&self) -> &vte::Terminal {
         &self.terminal
+    }
+
+    /// The CSS class a window carries while this tab is selected in it.
+    pub fn css_class(&self) -> &str {
+        &self.dressing.css_class
+    }
+
+    /// Reloads the window highlight for the current leader, palette,
+    /// appearance and `visual-process-leader` setting.
+    fn update_dressing(&mut self) {
+        let highlighted = matches!(self.leader_kind, LeaderKind::Superuser | LeaderKind::Remote);
+        let css = if highlighted && self.app_settings.visual_process_leader() {
+            let dark = adw::StyleManager::default().is_dark();
+            palette::lookup_or_default(&self.profile.palette_id())
+                .map(|palette| {
+                    leader_css(
+                        &self.dressing.css_class,
+                        self.leader_kind,
+                        palette.face(dark),
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.dressing.load(css);
+    }
+
+    /// Records a new leader; returns whether it changed.
+    fn set_leader_kind(&mut self, kind: LeaderKind, root: &gtk::Box) -> bool {
+        if kind == self.leader_kind {
+            return false;
+        }
+        self.leader_kind = kind;
+        if let Some((tab_view, page)) = find_page(root) {
+            // Like ptyxis_tab_poll_agent_cb(), flag background tabs.
+            if tab_view.selected_page().as_ref() != Some(&page) {
+                page.set_needs_attention(true);
+            }
+            let icon = kind.icon_name().map(gio::ThemedIcon::new);
+            page.set_icon(icon.as_ref());
+        }
+        self.update_dressing();
+        true
+    }
+
+    fn poll_leader(&mut self, root: &gtk::Box) {
+        let running = self.state == TabState::Running;
+        let leader = running
+            .then(|| self.terminal.pty())
+            .flatten()
+            .and_then(|pty| leader::foreground_leader(pty.fd()));
+        let (pgrp, kind) = leader.map_or((None, LeaderKind::Unknown), |(pgrp, kind)| {
+            (Some(pgrp), kind)
+        });
+        // As in ptyxis_tab_poll_agent_cb(), a new foreground process counts
+        // as a change even when its kind is the same, so checks stay quick.
+        let new_process = std::mem::replace(&mut self.leader_pgrp, pgrp) != pgrp;
+        let changed = self.set_leader_kind(kind, root) | new_process;
+        // Without a process there is nothing to watch until output resumes.
+        if running {
+            self.leader_monitor.polled(changed);
+        }
     }
 
     fn title(&self) -> String {
@@ -343,6 +576,7 @@ impl Tab {
         } else {
             TabState::Failed
         };
+        self.set_leader_kind(LeaderKind::Unknown, root);
         let quick_exit =
             self.spawned_at.elapsed() < QUICK_EXIT_THRESHOLD && !self.has_pressed_key.get();
         match exit_outcome(
@@ -413,6 +647,21 @@ impl Component for Tab {
         let has_pressed_key = Rc::new(Cell::new(false));
         let pressed = Rc::clone(&has_pressed_key);
         terminal.connect_commit(move |_, _, _| pressed.set(true));
+
+        let leader_monitor = LeaderMonitor::new(sender.input_sender().clone());
+        let monitor = Rc::clone(&leader_monitor);
+        terminal.connect_contents_changed(move |_| monitor.contents_changed());
+        // Capture phase sees keys before the terminal consumes them.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let monitor = Rc::clone(&leader_monitor);
+        keys.connect_key_pressed(move |_, key, _, state| {
+            if is_interactive_key(key, state) {
+                monitor.interactive_key();
+            }
+            glib::Propagation::Proceed
+        });
+        root.add_controller(keys);
 
         terminal.set_context_menu_model(Some(&context_menu()));
         install_terminal_actions(&terminal);
@@ -490,6 +739,10 @@ impl Component for Tab {
             inspector: None,
             title_dialog: None,
             title_dialog_serial: 0,
+            leader_kind: LeaderKind::Unknown,
+            leader_pgrp: None,
+            leader_monitor,
+            dressing: Dressing::new(),
             shared_handlers,
         };
         model.respawn(&sender);
@@ -525,9 +778,11 @@ impl Component for Tab {
                 self.show_banner("Failed to launch terminal", BannerAction::EditProfile);
             }
             TabInput::Exited(exit) => self.handle_exit(exit, root, &sender),
+            TabInput::PollLeader => self.poll_leader(root),
             TabInput::UpdateTitle => {}
             TabInput::AppSettingsChanged => {
                 terminal::apply_app_settings(&self.terminal, &self.app_settings);
+                self.update_dressing();
                 // Like the C property binding, only a change of the setting
                 // itself overrides the tab's choice.
                 let setting = self.app_settings.ignore_osc_title();
@@ -542,9 +797,11 @@ impl Component for Tab {
             TabInput::ProfileChanged => {
                 terminal::apply_profile(&self.terminal, &self.profile);
                 terminal::apply_profile_palette(&self.terminal, &self.profile);
+                self.update_dressing();
             }
             TabInput::AppearanceChanged => {
                 terminal::apply_profile_palette(&self.terminal, &self.profile);
+                self.update_dressing();
             }
             TabInput::Bell => {
                 if let Some((tab_view, page)) = find_page(root)
@@ -630,6 +887,7 @@ impl Component for Tab {
     }
 
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
+        self.leader_monitor.stop();
         // The inspector describes this terminal, so it goes with the tab.
         if let Some(inspector) = self.inspector.take() {
             inspector.widget().destroy();
@@ -707,6 +965,53 @@ mod tests {
                 expected,
                 "{prefix:?}"
             );
+        }
+    }
+
+    #[test]
+    fn interactive_keys() {
+        use gdk::{Key, ModifierType as M};
+        let cases = [
+            (Key::Return, M::empty(), true),
+            (Key::KP_Enter, M::SHIFT_MASK, true),
+            (Key::c, M::CONTROL_MASK, true),
+            (Key::d, M::CONTROL_MASK | M::SHIFT_MASK, true),
+            (Key::c, M::empty(), false),
+            (Key::x, M::CONTROL_MASK, false),
+        ];
+        for (key, state, expected) in cases {
+            assert_eq!(
+                is_interactive_key(key, state),
+                expected,
+                "{key:?} {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leader_highlight_css() {
+        let palette = palette::lookup_or_default(palette::DEFAULT_PALETTE_ID).unwrap();
+        let face = palette.face(true);
+        assert_eq!(leader_css("ptyxis-tab-1", LeaderKind::Unknown, face), "");
+        assert_eq!(leader_css("ptyxis-tab-1", LeaderKind::Container, face), "");
+        for (kind, scarf) in [
+            (LeaderKind::Superuser, face.superuser),
+            (LeaderKind::Remote, face.remote),
+        ] {
+            let css = leader_css("ptyxis-tab-1", kind, face);
+            let style = format!(
+                "{{ background-color: {}; color: {}; }}",
+                scarf.background, scarf.foreground
+            );
+            for selector in [
+                "window.ptyxis-tab-1 toolbarview.window-contents > revealer.top-bar > windowhandle",
+                "window.ptyxis-tab-1 toolbarview.window-contents headerbar",
+            ] {
+                assert!(
+                    css.contains(&format!("{selector} {style}")),
+                    "{kind:?}: {css}"
+                );
+            }
         }
     }
 

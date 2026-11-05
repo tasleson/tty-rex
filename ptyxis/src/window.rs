@@ -43,6 +43,9 @@ use crate::title_dialog::SET_TITLE_LABEL;
 
 const DEFAULT_ICON_NAME: &str = "utilities-terminal-symbolic";
 const DEVEL_STYLE_CLASS: &str = "devel";
+/// Marks the window's main toolbar view, scoping window-dressing CSS so
+/// it skips dialogs (`window-contents` in `src/ptyxis-window.ui`).
+pub const WINDOW_CONTENTS_CLASS: &str = "window-contents";
 const MIN_WIDTH: i32 = 360;
 const MIN_HEIGHT: i32 = 294;
 
@@ -139,6 +142,9 @@ pub struct Window {
     _pinned_signals: glib::SignalGroup,
     /// Handlers on the selected tab's terminal, dropped on tab switch.
     terminal_handlers: Option<(vte::Terminal, Vec<glib::SignalHandlerId>)>,
+    /// CSS class of the selected tab, which lets that tab style the window
+    /// (e.g. highlight it while running sudo or ssh).
+    tab_css_class: Option<String>,
 }
 
 /// Registers a parameterless action that forwards `message` to the window
@@ -247,6 +253,13 @@ impl Window {
         }
         self.copy_action.set_enabled(false);
         let tab = page.as_ref().and_then(|page| self.app.tab(&page.child()));
+        if let Some(class) = self.tab_css_class.take() {
+            self.window.remove_css_class(&class);
+        }
+        if let Some(tab) = &tab {
+            self.window.add_css_class(&tab.css_class);
+            self.tab_css_class = Some(tab.css_class.clone());
+        }
         self.find_bar.emit(FindBarInput::SetTerminal(
             tab.as_ref().map(|t| t.terminal.clone()),
         ));
@@ -522,6 +535,7 @@ impl Component for Window {
         content.append(&find_bar_revealer);
 
         let toolbar_view = adw::ToolbarView::new();
+        toolbar_view.add_css_class(WINDOW_CONTENTS_CLASS);
         toolbar_view.add_top_bar(&header);
         toolbar_view.add_top_bar(&tab_bar);
         toolbar_view.set_content(Some(&content));
@@ -625,6 +639,7 @@ impl Component for Window {
             copy_action,
             _pinned_signals: pinned_signals,
             terminal_handlers: None,
+            tab_css_class: None,
         };
         ComponentParts { model, widgets: () }
     }

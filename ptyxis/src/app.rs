@@ -76,6 +76,7 @@ struct TabHandle {
     terminal: vte::Terminal,
     profile_uuid: String,
     zoom: Rc<Cell<ZoomLevel>>,
+    css_class: String,
 }
 
 /// Cheap clones of a tab's shared state for use by windows.
@@ -84,6 +85,8 @@ pub struct TabRef {
     pub terminal: vte::Terminal,
     pub profile_uuid: String,
     pub zoom: Rc<Cell<ZoomLevel>>,
+    /// Added to the window while the tab is selected (see `Tab::css_class`).
+    pub css_class: String,
 }
 
 /// Handle to a launched window.
@@ -235,6 +238,7 @@ impl App {
             .detach();
         let child: gtk::Widget = controller.widget().clone().upcast();
         let terminal = controller.model().terminal().clone();
+        let css_class = controller.model().css_class().to_owned();
         self.tabs.borrow_mut().insert(
             child.clone(),
             TabHandle {
@@ -242,6 +246,7 @@ impl App {
                 terminal,
                 profile_uuid,
                 zoom,
+                css_class,
             },
         );
         Ok(child)
@@ -253,6 +258,7 @@ impl App {
             terminal: handle.terminal.clone(),
             profile_uuid: handle.profile_uuid.clone(),
             zoom: Rc::clone(&handle.zoom),
+            css_class: handle.css_class.clone(),
         })
     }
 
