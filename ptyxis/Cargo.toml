@@ -1,0 +1,17 @@
+[package]
+name = "ptyxis"
+description = "A container-oriented terminal for GNOME (Rust port)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+build = "build.rs"
+
+[dependencies]
+# Version features track the minimums from the toplevel meson.build
+# (gtk >= 4.14, libadwaita >= 1.8, vte >= 0.79, glib >= 2.90).
+relm4 = { version = "0.11", features = ["libadwaita", "gnome_46"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
+vte = { package = "vte4", version = "0.10", features = ["v0_78"] }
+thiserror = "2"
