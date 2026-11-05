@@ -40,6 +40,7 @@ pub mod find_bar;
 pub mod palette;
 pub mod profile;
 pub mod settings;
+pub mod shortcuts;
 pub mod spawn;
 pub mod tab;
 pub mod terminal;

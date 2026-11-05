@@ -37,6 +37,7 @@ use crate::app::{App, TabRequest};
 use crate::config;
 use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
 use crate::settings::NewTabPosition;
+use crate::shortcuts::Shortcuts;
 use crate::terminal;
 
 const DEFAULT_ICON_NAME: &str = "utilities-terminal-symbolic";
@@ -104,6 +105,8 @@ pub struct Window {
     title_bindings: glib::BindingGroup,
     find_bar: Controller<FindBar>,
     find_bar_revealer: gtk::Revealer,
+    /// Kept alive so the controller follows settings changes.
+    _shortcuts: Option<Shortcuts>,
     cwd_handler: Option<(vte::Terminal, glib::SignalHandlerId)>,
 }
 
@@ -274,6 +277,8 @@ impl Component for Window {
         let tab_view = adw::TabView::new();
         tab_view.set_default_icon(&gio::ThemedIcon::new(DEFAULT_ICON_NAME));
         tab_view.set_vexpand(true);
+        // Our own GSettings-driven shortcuts replace libadwaita's defaults.
+        tab_view.set_shortcuts(adw::TabViewShortcuts::empty());
 
         let tab_bar = adw::TabBar::builder()
             .view(&tab_view)
@@ -357,6 +362,11 @@ impl Component for Window {
         add_action::<SearchAction>(&mut actions, &sender, || WindowInput::ShowFind);
         actions.register_for_widget(&window);
 
+        let shortcuts = Shortcuts::new()
+            .inspect(|shortcuts| window.add_controller(shortcuts.controller().clone()))
+            .inspect_err(|e| glib::g_warning!("Ptyxis", "Keyboard shortcuts unavailable: {e}"))
+            .ok();
+
         let input = sender.input_sender().clone();
         tab_view
             .connect_selected_page_notify(move |_| input.emit(WindowInput::SelectedPageChanged));
@@ -400,6 +410,7 @@ impl Component for Window {
             title_bindings,
             find_bar,
             find_bar_revealer,
+            _shortcuts: shortcuts,
             cwd_handler: None,
         };
         ComponentParts { model, widgets: () }
