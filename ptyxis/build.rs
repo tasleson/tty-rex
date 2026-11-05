@@ -27,6 +27,10 @@
 //!
 //! The bundled palettes in `src/palettes/` are embedded into the binary
 //! (the C build does the same via GResource), keyed by file stem.
+//!
+//! The icons in `src/icons/` are compiled into a GResource at the same
+//! paths as in `src/ptyxis.gresource.xml`, so GTK finds them through the
+//! application's resource base path.
 
 use std::env;
 use std::fs;
@@ -38,6 +42,9 @@ const SCHEMA_PATH: &str = "/org/gnome/Ptyxis/";
 const SCHEMA_TEMPLATE: &str = "org.gnome.Ptyxis.gschema.xml.in";
 const PALETTES_DIR: &str = "palettes";
 const PALETTE_SUFFIX: &str = ".palette";
+const ICONS_DIR: &str = "icons";
+const RESOURCE_PREFIX: &str = "/org/gnome/Ptyxis";
+const RESOURCE_FILE: &str = "ptyxis.gresource";
 
 fn c_source_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("set by cargo"));
@@ -127,6 +134,73 @@ fn generate_palettes(src_dir: &Path, out_dir: &Path) {
     fs::write(&dest, code).unwrap_or_else(|e| panic!("failed to write {}: {e}", dest.display()));
 }
 
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("readable icon directory entry").path();
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+fn generate_resources(src_dir: &Path, out_dir: &Path) {
+    let icons_dir = src_dir.join(ICONS_DIR);
+    println!("cargo::rerun-if-changed={}", icons_dir.display());
+
+    let mut files = Vec::new();
+    collect_files(&icons_dir, &mut files);
+    files.sort();
+
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gresources>\n  <gresource prefix=\"{RESOURCE_PREFIX}\">\n"
+    );
+    for file in &files {
+        let relative = file
+            .strip_prefix(src_dir)
+            .expect("icon below the source directory");
+        // Only XML (SVG) files may be stripped; anything else is copied.
+        let preprocess = if file.extension().is_some_and(|ext| ext == "svg") {
+            " preprocess=\"xml-stripblanks\""
+        } else {
+            ""
+        };
+        xml.push_str(&format!(
+            "    <file{preprocess}>{}</file>\n",
+            relative.display()
+        ));
+    }
+    xml.push_str("  </gresource>\n</gresources>\n");
+    let manifest = out_dir.join("ptyxis.gresource.xml");
+    fs::write(&manifest, xml)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", manifest.display()));
+
+    // Like the schema, a missing tool only costs the icons; the binary
+    // still builds and embeds an empty (rejected at runtime) resource.
+    let target = out_dir.join(RESOURCE_FILE);
+    match Command::new("glib-compile-resources")
+        .arg("--sourcedir")
+        .arg(src_dir)
+        .arg("--target")
+        .arg(&target)
+        .arg(&manifest)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        result => {
+            println!(
+                "cargo::warning=glib-compile-resources failed ({result:?}); icons will be \
+                 missing. After installing it, run `cargo clean -p ptyxis`"
+            );
+            fs::write(&target, b"")
+                .unwrap_or_else(|e| panic!("failed to write {}: {e}", target.display()));
+        }
+    }
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("set by cargo"));
     let src_dir = c_source_dir();
@@ -134,4 +208,5 @@ fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     generate_schema(&src_dir, &out_dir);
     generate_palettes(&src_dir, &out_dir);
+    generate_resources(&src_dir, &out_dir);
 }

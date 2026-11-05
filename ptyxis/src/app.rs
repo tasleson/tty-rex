@@ -45,6 +45,16 @@ use crate::tab::{Tab, TabInit, TabInput};
 use crate::terminal::ZoomLevel;
 use crate::window::{NewTabWithProfileAction, Window, WindowInit, WindowInput};
 
+/// Icons from `src/icons/`, compiled by `build.rs`.
+static RESOURCES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ptyxis.gresource"));
+
+fn register_resources() {
+    match gio::Resource::from_data(&glib::Bytes::from_static(RESOURCES)) {
+        Ok(resource) => gio::resources_register(&resource),
+        Err(e) => glib::g_warning!("Ptyxis", "Bundled icons are unavailable: {e}"),
+    }
+}
+
 /// The C build's stylesheet, shared so widgets ported from it look the same.
 const STYLESHEET: &str = include_str!("../../../src/style.css");
 
@@ -422,9 +432,11 @@ pub fn run() -> glib::ExitCode {
         flags |= gio::ApplicationFlags::NON_UNIQUE | gio::ApplicationFlags::CAN_OVERRIDE_APP_ID;
     }
 
+    register_resources();
     let application = adw::Application::builder()
         .application_id(config::APP_ID)
         .flags(flags)
+        .resource_base_path(config::RESOURCE_BASE_PATH)
         .build();
     cli::register_options(&application);
     // Registers the application with relm4 (for `relm4::main_application()`);

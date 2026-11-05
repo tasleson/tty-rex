@@ -42,6 +42,9 @@ pub const PROFILE_SCHEMA_ID: &str = "org.gnome.Ptyxis.Profile";
 pub const SHORTCUTS_SCHEMA_ID: &str = "org.gnome.Ptyxis.Shortcuts";
 pub const SHORTCUTS_SCHEMA_PATH: &str = "/org/gnome/Ptyxis/Shortcuts/";
 
+/// Resource base path, matching the C application's.
+pub const RESOURCE_BASE_PATH: &str = "/org/gnome/Ptyxis";
+
 /// Directory containing the schema compiled by `build.rs`, if
 /// `glib-compile-schemas` was available at build time.
 pub const BUILD_SCHEMA_DIR: Option<&str> = option_env!("PTYXIS_BUILD_SCHEMA_DIR");
