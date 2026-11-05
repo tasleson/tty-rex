@@ -52,6 +52,7 @@ pub mod key {
     pub const TEXT_BLINK_MODE: &str = "text-blink-mode";
     pub const USE_SYSTEM_FONT: &str = "use-system-font";
     pub const VISUAL_BELL: &str = "visual-bell";
+    pub const VISUAL_PROCESS_LEADER: &str = "visual-process-leader";
     pub const WINDOW_SIZE: &str = "window-size";
 
     /// All keys, for validation against the schema template.
@@ -75,6 +76,7 @@ pub mod key {
         TEXT_BLINK_MODE,
         USE_SYSTEM_FONT,
         VISUAL_BELL,
+        VISUAL_PROCESS_LEADER,
         WINDOW_SIZE,
     ];
 }
@@ -384,6 +386,12 @@ impl AppSettings {
 
     pub fn ignore_osc_title(&self) -> bool {
         self.settings.boolean(key::IGNORE_OSC_TITLE)
+    }
+
+    /// Whether the window is highlighted while a superuser or remote
+    /// process leads the active terminal.
+    pub fn visual_process_leader(&self) -> bool {
+        self.settings.boolean(key::VISUAL_PROCESS_LEADER)
     }
 
     pub fn cursor_shape(&self) -> CursorShape {
