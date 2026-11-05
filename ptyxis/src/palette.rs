@@ -49,6 +49,17 @@ const KEY_BACKGROUND: &str = "Background";
 const KEY_CURSOR: &str = "Cursor";
 const KEY_CURSOR_BACKGROUND: &str = "CursorBackground";
 const KEY_CURSOR_FOREGROUND: &str = "CursorForeground";
+const KEY_TITLEBAR_FOREGROUND: &str = "TitlebarForeground";
+const KEY_TITLEBAR_BACKGROUND: &str = "TitlebarBackground";
+const KEY_SUPERUSER_FOREGROUND: &str = "SuperuserForeground";
+const KEY_SUPERUSER_BACKGROUND: &str = "SuperuserBackground";
+const KEY_REMOTE_FOREGROUND: &str = "RemoteForeground";
+const KEY_REMOTE_BACKGROUND: &str = "RemoteBackground";
+
+/// Indexed colors the superuser and remote highlights derive from when a
+/// palette does not set them (red and bright blue).
+const SUPERUSER_BASE_INDEX: usize = 1;
+const REMOTE_BASE_INDEX: usize = 12;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PaletteError {
@@ -74,14 +85,27 @@ pub enum PaletteError {
     },
 }
 
+/// A foreground/background pair used to highlight the window, such as
+/// while a superuser or remote process leads the terminal
+/// (`PtyxisPaletteScarf`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scarf {
+    pub foreground: gdk::RGBA,
+    pub background: gdk::RGBA,
+}
+
 /// The colors for one appearance (light or dark).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Face {
     pub foreground: gdk::RGBA,
     pub background: gdk::RGBA,
+    pub titlebar_foreground: gdk::RGBA,
+    pub titlebar_background: gdk::RGBA,
     pub cursor_background: Option<gdk::RGBA>,
     pub cursor_foreground: Option<gdk::RGBA>,
     pub indexed: [gdk::RGBA; N_INDEXED_COLORS],
+    pub superuser: Scarf,
+    pub remote: Scarf,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +125,86 @@ pub fn is_dark(color: &gdk::RGBA) -> bool {
     let [r, g, b] = [color.red(), color.green(), color.blue()].map(|c| f64::from(c) * 255.0);
     let hsp = (0.299 * r * r + 0.587 * g * g + 0.114 * b * b).sqrt();
     hsp <= 127.5
+}
+
+/// Converts to hue (degrees), saturation and lightness, as
+/// `_gdk_hsla_init_from_rgba()` in `src/gdkhsla.c` does.
+fn rgb_to_hsl(color: &gdk::RGBA) -> (f32, f32, f32) {
+    let (r, g, b) = (color.red(), color.green(), color.blue());
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let lightness = (max + min) / 2.0;
+    if max == min {
+        return (0.0, 0.0, lightness);
+    }
+    let delta = max - min;
+    let saturation = if lightness <= 0.5 {
+        delta / (max + min)
+    } else {
+        delta / (2.0 - max - min)
+    };
+    let hue = if r == max {
+        (g - b) / delta
+    } else if g == max {
+        2.0 + (b - r) / delta
+    } else {
+        4.0 + (r - g) / delta
+    } * 60.0;
+    (hue.rem_euclid(360.0), saturation, lightness)
+}
+
+/// Inverse of [`rgb_to_hsl`] (`_gdk_rgba_init_from_hsla()`).
+fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32, alpha: f32) -> gdk::RGBA {
+    if saturation == 0.0 {
+        return gdk::RGBA::new(lightness, lightness, lightness, alpha);
+    }
+    let m2 = if lightness <= 0.5 {
+        lightness * (1.0 + saturation)
+    } else {
+        lightness + saturation - lightness * saturation
+    };
+    let m1 = 2.0 * lightness - m2;
+    let channel = |hue: f32| {
+        let hue = hue.rem_euclid(360.0);
+        if hue < 60.0 {
+            m1 + (m2 - m1) * hue / 60.0
+        } else if hue < 180.0 {
+            m2
+        } else if hue < 240.0 {
+            m1 + (m2 - m1) * (240.0 - hue) / 60.0
+        } else {
+            m1
+        }
+    };
+    gdk::RGBA::new(
+        channel(hue + 120.0),
+        channel(hue),
+        channel(hue - 120.0),
+        alpha,
+    )
+}
+
+/// Scales lightness and saturation by `factor` (`_gdk_rgba_shade()`).
+pub fn shade(color: &gdk::RGBA, factor: f32) -> gdk::RGBA {
+    let (hue, saturation, lightness) = rgb_to_hsl(color);
+    hsl_to_rgb(
+        hue,
+        (saturation * factor).clamp(0.0, 1.0),
+        (lightness * factor).clamp(0.0, 1.0),
+        color.alpha(),
+    )
+}
+
+/// Blends `amount` of `fg` over `bg`, yielding an opaque color (`mix()` in
+/// `src/ptyxis-palette.c`).
+pub fn mix(fg: &gdk::RGBA, bg: &gdk::RGBA, amount: f32) -> gdk::RGBA {
+    let blend = |f: f32, b: f32| (1.0 - amount) * b + amount * f;
+    gdk::RGBA::new(
+        blend(fg.red(), bg.red()),
+        blend(fg.green(), bg.green()),
+        blend(fg.blue(), bg.blue()),
+        1.0,
+    )
 }
 
 struct FaceReader<'a> {
@@ -153,12 +257,49 @@ impl FaceReader<'_> {
             *slot = self.required(&format!("Color{i}"))?;
         }
 
+        // Derived defaults follow ptyxis_palette_load_face().
+        let dark = is_dark(&background);
+        let titlebar_foreground = self
+            .optional(KEY_TITLEBAR_FOREGROUND)?
+            .unwrap_or_else(|| shade(&foreground, if dark { 1.25 } else { 0.95 }));
+        let titlebar_background = self.optional(KEY_TITLEBAR_BACKGROUND)?.unwrap_or_else(|| {
+            if dark {
+                shade(&background, 1.25)
+            } else {
+                background
+            }
+        });
+        let scarf = |fg_key, bg_key, base: usize| -> Result<Scarf, PaletteError> {
+            Ok(Scarf {
+                foreground: self
+                    .optional(fg_key)?
+                    .unwrap_or_else(|| shade(&titlebar_foreground, if dark { 1.0 } else { 0.8 })),
+                background: self.optional(bg_key)?.unwrap_or_else(|| {
+                    mix(&indexed[base], &background, if dark { 0.33 } else { 0.5 })
+                }),
+            })
+        };
+        let superuser = scarf(
+            KEY_SUPERUSER_FOREGROUND,
+            KEY_SUPERUSER_BACKGROUND,
+            SUPERUSER_BASE_INDEX,
+        )?;
+        let remote = scarf(
+            KEY_REMOTE_FOREGROUND,
+            KEY_REMOTE_BACKGROUND,
+            REMOTE_BASE_INDEX,
+        )?;
+
         Ok(Face {
             foreground,
             background,
+            titlebar_foreground,
+            titlebar_background,
             cursor_background,
             cursor_foreground,
             indexed,
+            superuser,
+            remote,
         })
     }
 }
@@ -590,6 +731,121 @@ mod tests {
         let first = lookup_builtin(DEFAULT_PALETTE_ID).unwrap();
         let second = lookup_builtin(DEFAULT_PALETTE_ID).unwrap();
         assert_eq!(first, second);
+    }
+
+    fn rgba(color: &str) -> gdk::RGBA {
+        gdk::RGBA::parse(color).unwrap()
+    }
+
+    fn assert_close(actual: &gdk::RGBA, expected: &gdk::RGBA, context: &str) {
+        let channels = |c: &gdk::RGBA| [c.red(), c.green(), c.blue(), c.alpha()];
+        for (a, e) in channels(actual).into_iter().zip(channels(expected)) {
+            assert!((a - e).abs() < 1e-4, "{context}: {actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn hsl_shading() {
+        let cases = [
+            // (color, factor, expected)
+            ("#808080", 1.0, "#808080"),
+            ("#ffffff", 0.5, "rgb(50%,50%,50%)"),
+            ("#ff0000", 0.8, "rgb(72%,8%,8%)"),
+            ("#ff0000", 1.25, "rgb(100%,25%,25%)"),
+            ("#000000", 1.25, "#000000"),
+            ("rgba(0,0,255,0.5)", 1.0, "rgba(0,0,255,0.5)"),
+            ("#c01c28", 1.0, "#c01c28"),
+        ];
+        for (color, factor, expected) in cases {
+            assert_close(
+                &shade(&rgba(color), factor),
+                &rgba(expected),
+                &format!("shade({color}, {factor})"),
+            );
+        }
+    }
+
+    #[test]
+    fn color_mixing() {
+        let cases = [
+            ("#ff0000", "#0000ff", 0.0, "#0000ff"),
+            ("#ff0000", "#0000ff", 1.0, "#ff0000"),
+            ("#ffffff", "#000000", 0.5, "rgb(50%,50%,50%)"),
+            ("rgba(255,0,0,0.2)", "#000000", 1.0, "#ff0000"),
+        ];
+        for (fg, bg, amount, expected) in cases {
+            assert_close(
+                &mix(&rgba(fg), &rgba(bg), amount),
+                &rgba(expected),
+                &format!("mix({fg}, {bg}, {amount})"),
+            );
+        }
+    }
+
+    #[test]
+    fn scarves_default_from_indexed_colors() {
+        let data = format!("[Palette]\nName=Flat\n{MINIMAL_COLORS}");
+        let face = Palette::parse("flat", "flat", &data)
+            .unwrap()
+            .face(true)
+            .clone();
+        // Black background: dark defaults.
+        assert_close(
+            &face.titlebar_background,
+            &shade(&face.background, 1.25),
+            "titlebar background",
+        );
+        assert_close(
+            &face.superuser.background,
+            &mix(&face.indexed[1], &face.background, 0.33),
+            "superuser background",
+        );
+        assert_close(
+            &face.remote.background,
+            &mix(&face.indexed[12], &face.background, 0.33),
+            "remote background",
+        );
+        assert_close(
+            &face.superuser.foreground,
+            &face.titlebar_foreground,
+            "superuser foreground",
+        );
+
+        let light = data.replace("Background=#000000", "Background=#ffffff");
+        let face = Palette::parse("l", "l", &light)
+            .unwrap()
+            .face(false)
+            .clone();
+        assert_eq!(face.titlebar_background, face.background);
+        assert_close(
+            &face.remote.background,
+            &mix(&face.indexed[12], &face.background, 0.5),
+            "light remote background",
+        );
+        assert_close(
+            &face.remote.foreground,
+            &shade(&face.titlebar_foreground, 0.8),
+            "light remote foreground",
+        );
+    }
+
+    #[test]
+    fn scarves_can_be_overridden() {
+        let data = format!(
+            "[Palette]\nName=S\n{MINIMAL_COLORS}SuperuserForeground=#010101\n\
+             SuperuserBackground=#020202\nRemoteForeground=#030303\n\
+             RemoteBackground=#040404\nTitlebarBackground=#050505\n"
+        );
+        let face = Palette::parse("s", "s", &data).unwrap().face(true).clone();
+        assert_eq!(face.superuser.foreground, rgba("#010101"));
+        assert_eq!(face.superuser.background, rgba("#020202"));
+        assert_eq!(face.remote.foreground, rgba("#030303"));
+        assert_eq!(face.remote.background, rgba("#040404"));
+        assert_eq!(face.titlebar_background, rgba("#050505"));
+
+        let bad = format!("[Palette]\nName=S\n{MINIMAL_COLORS}RemoteBackground=nope\n");
+        let err = Palette::parse("s", "s", &bad).unwrap_err();
+        assert!(err.to_string().contains("RemoteBackground"), "{err}");
     }
 
     #[test]
