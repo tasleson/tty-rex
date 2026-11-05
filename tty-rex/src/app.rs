@@ -128,6 +128,10 @@ pub struct App {
 
 relm4::new_action_group!(AppActions, "app");
 relm4::new_stateless_action!(PreferencesAction, AppActions, "preferences");
+// Desktop actions of the D-Bus activatable desktop file; GNOME Shell also
+// launches through `new-window` (`ptyxis_application_new_window_action()`).
+relm4::new_stateless_action!(NewWindowAction, AppActions, "new-window");
+relm4::new_stateless_action!(NewTabAction, AppActions, "new-tab");
 relm4::new_stateful_action!(EditProfileAction, AppActions, "edit-profile", String, ());
 
 impl App {
@@ -206,6 +210,22 @@ impl App {
                 }
             });
         application.add_action(edit_profile.gio_action());
+        let weak = Rc::downgrade(&app);
+        let new_window = RelmAction::<NewWindowAction>::new_stateless(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.open_window_with_tab(TabRequest::default())
+                    .window
+                    .present();
+            }
+        });
+        application.add_action(new_window.gio_action());
+        let weak = Rc::downgrade(&app);
+        let new_tab = RelmAction::<NewTabAction>::new_stateless(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.new_tab_in_current_window();
+            }
+        });
+        application.add_action(new_tab.gio_action());
 
         Ok(app)
     }
@@ -336,6 +356,19 @@ impl App {
         let window = self.new_window();
         window.sender.emit(WindowInput::AddTab(request));
         window
+    }
+
+    /// Opens a tab with the default profile in the current window, or in a
+    /// new one (`ptyxis_application_new_tab_action()`).
+    fn new_tab_in_current_window(self: &Rc<Self>) {
+        let request = TabRequest::default();
+        match self.current_window() {
+            Some(window) => {
+                window.sender.emit(WindowInput::AddTab(request));
+                window.window.present();
+            }
+            None => self.open_window_with_tab(request).window.present(),
+        }
     }
 
     fn activate(self: &Rc<Self>) {
