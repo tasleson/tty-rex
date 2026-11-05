@@ -1,0 +1,395 @@
+// dressing.rs
+//
+// Copyright 2023 Christian Hergert <christian@sourceandstack.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Window colors derived from the selected tab's palette
+//! (`src/ptyxis-window-dressing.c`).
+//!
+//! The C build keeps one dressing per window and rebinds it to the active
+//! tab's profile. Here every tab owns a [`Dressing`] whose rules are keyed
+//! on a class unique to that tab, and a window carries the class of its
+//! selected tab. A tab then restyles whichever window shows it from the
+//! updates it already receives, and moving tabs between windows needs no
+//! extra bookkeeping.
+//!
+//! Colors that the C CSS computes with GTK's `mix()` and `alpha()` are
+//! computed here instead, since those functions are deprecated.
+
+use std::fmt::Write as _;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use gtk::gdk;
+
+use crate::leader::LeaderKind;
+use crate::palette::{self, Face, Scarf};
+use crate::window::WINDOW_CONTENTS_CLASS;
+
+/// Prefix of the CSS class that marks the window showing a given tab.
+const CLASS_PREFIX: &str = "ptyxis-tab-";
+/// Popovers stay legible however transparent the window is.
+const MIN_POPOVER_OPACITY: f64 = 0.85;
+/// How far the backdrop title bar fades towards the terminal background.
+const BACKDROP_FOREGROUND_MIX: f32 = 0.025;
+const BACKDROP_BACKGROUND_MIX: f32 = 0.99;
+/// Share of the background in the palette-derived accent color.
+const ACCENT_BACKGROUND_MIX: f32 = 0.15;
+/// Palette color the accent derives from (blue).
+const ACCENT_BASE_INDEX: usize = 4;
+
+/// Everything the window colors depend on.
+#[derive(Debug, Clone, Copy)]
+pub struct DressingStyle<'a> {
+    pub face: &'a Face,
+    /// The appearance `face` was chosen for.
+    pub dark: bool,
+    /// Profile opacity of the window background.
+    pub opacity: f64,
+    /// Process leading the terminal, highlighted when `visual_process_leader`.
+    pub leader: LeaderKind,
+    pub visual_process_leader: bool,
+    pub use_system_accent: bool,
+}
+
+fn with_alpha(color: &gdk::RGBA, alpha: f64) -> gdk::RGBA {
+    // GTK colors are f32; the precision lost here is invisible.
+    let alpha = (f64::from(color.alpha()) * alpha) as f32;
+    gdk::RGBA::new(color.red(), color.green(), color.blue(), alpha)
+}
+
+fn rule(css: &mut String, selector: &str, color: &gdk::RGBA, background: &gdk::RGBA) {
+    // Writing to a String cannot fail.
+    let _ = writeln!(
+        css,
+        "{selector} {{ color: {color}; background-color: {background}; }}"
+    );
+}
+
+/// The window CSS for the window carrying `css_class`, following
+/// `ptyxis_window_dressing_update()`. Selectors are adapted to the port's
+/// widget tree; rules for widgets the port does not have yet (tab overview,
+/// visual bell flash, size and hover-URI labels) are left out.
+pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
+    let face = style.face;
+    let window = format!("window.{css_class}");
+    let contents = format!("{window} toolbarview.{WINDOW_CONTENTS_CLASS}");
+    let top_bar = format!("{contents} > revealer.top-bar > windowhandle");
+    let popover_alpha = style.opacity.max(MIN_POPOVER_OPACITY);
+    let popover_background = with_alpha(&face.titlebar_background, popover_alpha);
+    let mut css = String::new();
+
+    // Terminals leave their background to the window (as the C build does
+    // by dropping VTE's background node), so themes must not paint one.
+    let _ = writeln!(css, "{window} vte-terminal {{ background: none; }}");
+    rule(
+        &mut css,
+        &window,
+        &face.foreground,
+        &with_alpha(&face.background, style.opacity),
+    );
+    let _ = writeln!(
+        css,
+        "{window}.fullscreen {{ background-color: {}; }}",
+        face.background
+    );
+    rule(
+        &mut css,
+        &format!("{contents} popover > contents"),
+        &face.titlebar_foreground,
+        &popover_background,
+    );
+    let _ = writeln!(
+        css,
+        "{contents} popover > arrow {{ background-color: {popover_background}; }}"
+    );
+    rule(
+        &mut css,
+        &format!("{contents} banner > revealer > widget"),
+        &face.visual_bell.foreground,
+        &face.visual_bell.background,
+    );
+    rule(
+        &mut css,
+        &top_bar,
+        &face.titlebar_foreground,
+        &face.titlebar_background,
+    );
+
+    let leader: Option<&Scarf> = match style.leader {
+        _ if !style.visual_process_leader => None,
+        LeaderKind::Superuser => Some(&face.superuser),
+        LeaderKind::Remote => Some(&face.remote),
+        LeaderKind::Unknown | LeaderKind::Container => None,
+    };
+    match leader {
+        Some(scarf) => {
+            for selector in [top_bar.as_str(), &format!("{contents} headerbar")] {
+                rule(&mut css, selector, &scarf.foreground, &scarf.background);
+            }
+        }
+        // The highlight outranks the backdrop fade in the C rules, so the
+        // fade only applies without one.
+        None => rule(
+            &mut css,
+            &format!(
+                "{window}:backdrop toolbarview.{WINDOW_CONTENTS_CLASS} > revealer.top-bar > windowhandle"
+            ),
+            &palette::mix(&face.background, &face.foreground, BACKDROP_FOREGROUND_MIX),
+            &palette::mix(&face.background, &face.foreground, BACKDROP_BACKGROUND_MIX),
+        ),
+    }
+
+    if !style.use_system_accent {
+        let accent_foreground = if style.dark {
+            face.titlebar_foreground
+        } else {
+            face.titlebar_background
+        };
+        let accent_background = palette::mix(
+            &face.background,
+            &face.indexed[ACCENT_BASE_INDEX],
+            ACCENT_BACKGROUND_MIX,
+        );
+        let _ = writeln!(
+            css,
+            "{window} {{ --accent-fg-color: {accent_foreground}; --accent-bg-color: {accent_background}; }}"
+        );
+    }
+    css
+}
+
+/// A CSS provider coloring the window while its tab is the selected one.
+pub struct Dressing {
+    css_class: String,
+    provider: gtk::CssProvider,
+    /// The CSS last loaded, to skip needless restyling.
+    css: String,
+}
+
+impl Dressing {
+    pub fn new() -> Self {
+        static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+        let provider = gtk::CssProvider::new();
+        if let Some(display) = gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
+            );
+        }
+        Self {
+            css_class: format!("{CLASS_PREFIX}{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+            provider,
+            css: String::new(),
+        }
+    }
+
+    /// The class a window carries while showing this tab.
+    pub fn css_class(&self) -> &str {
+        &self.css_class
+    }
+
+    pub fn update(&mut self, style: &DressingStyle<'_>) {
+        let css = dressing_css(&self.css_class, style);
+        if css != self.css {
+            self.provider.load_from_string(&css);
+            self.css = css;
+        }
+    }
+}
+
+impl Default for Dressing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for Dressing {
+    fn drop(&mut self) {
+        if let Some(display) = gdk::Display::default() {
+            gtk::style_context_remove_provider_for_display(&display, &self.provider);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLASS: &str = "ptyxis-tab-1";
+    const TOP_BAR: &str =
+        "window.ptyxis-tab-1 toolbarview.window-contents > revealer.top-bar > windowhandle";
+    const HEADERBAR: &str = "window.ptyxis-tab-1 toolbarview.window-contents headerbar";
+    const BACKDROP: &str = "window.ptyxis-tab-1:backdrop toolbarview.window-contents > revealer.top-bar > windowhandle";
+
+    fn face() -> Face {
+        palette::lookup_or_default(palette::DEFAULT_PALETTE_ID)
+            .unwrap()
+            .face(true)
+            .clone()
+    }
+
+    fn style(face: &Face) -> DressingStyle<'_> {
+        DressingStyle {
+            face,
+            dark: true,
+            opacity: 1.0,
+            leader: LeaderKind::Unknown,
+            visual_process_leader: true,
+            use_system_accent: false,
+        }
+    }
+
+    fn rule_for(selector: &str, color: &gdk::RGBA, background: &gdk::RGBA) -> String {
+        format!("{selector} {{ color: {color}; background-color: {background}; }}\n")
+    }
+
+    #[test]
+    fn base_rules() {
+        let face = face();
+        let css = dressing_css(CLASS, &style(&face));
+        for expected in [
+            "window.ptyxis-tab-1 vte-terminal { background: none; }\n".to_owned(),
+            rule_for("window.ptyxis-tab-1", &face.foreground, &face.background),
+            rule_for(
+                TOP_BAR,
+                &face.titlebar_foreground,
+                &face.titlebar_background,
+            ),
+            rule_for(
+                "window.ptyxis-tab-1 toolbarview.window-contents banner > revealer > widget",
+                &face.visual_bell.foreground,
+                &face.visual_bell.background,
+            ),
+        ] {
+            assert!(css.contains(&expected), "missing {expected:?} in\n{css}");
+        }
+        assert!(css.contains(BACKDROP), "{css}");
+        assert!(!css.contains(HEADERBAR), "{css}");
+        assert!(css.contains("--accent-bg-color"), "{css}");
+    }
+
+    #[test]
+    fn opacity_applies_to_window_and_popovers() {
+        let face = face();
+        let cases = [(1.0, 1.0), (0.5, MIN_POPOVER_OPACITY), (0.9, 0.9)];
+        for (opacity, popover) in cases {
+            let css = dressing_css(
+                CLASS,
+                &DressingStyle {
+                    opacity,
+                    ..style(&face)
+                },
+            );
+            let window = rule_for(
+                "window.ptyxis-tab-1",
+                &face.foreground,
+                &with_alpha(&face.background, opacity),
+            );
+            let popover = rule_for(
+                "window.ptyxis-tab-1 toolbarview.window-contents popover > contents",
+                &face.titlebar_foreground,
+                &with_alpha(&face.titlebar_background, popover),
+            );
+            assert!(css.contains(&window), "{opacity}: {css}");
+            assert!(css.contains(&popover), "{opacity}: {css}");
+        }
+    }
+
+    #[test]
+    fn leader_highlight() {
+        let face = face();
+        let cases = [
+            (LeaderKind::Superuser, true, Some(face.superuser)),
+            (LeaderKind::Remote, true, Some(face.remote)),
+            (LeaderKind::Container, true, None),
+            (LeaderKind::Unknown, true, None),
+            (LeaderKind::Superuser, false, None),
+        ];
+        for (leader, enabled, scarf) in cases {
+            let css = dressing_css(
+                CLASS,
+                &DressingStyle {
+                    leader,
+                    visual_process_leader: enabled,
+                    ..style(&face)
+                },
+            );
+            let context = format!("{leader:?} enabled={enabled}");
+            match scarf {
+                Some(scarf) => {
+                    for selector in [TOP_BAR, HEADERBAR] {
+                        let expected = rule_for(selector, &scarf.foreground, &scarf.background);
+                        assert!(css.contains(&expected), "{context}: {css}");
+                    }
+                    assert!(!css.contains(BACKDROP), "{context}: {css}");
+                }
+                None => {
+                    assert!(!css.contains(HEADERBAR), "{context}: {css}");
+                    assert!(css.contains(BACKDROP), "{context}: {css}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accent_follows_palette_unless_system() {
+        let face = face();
+        let css = dressing_css(
+            CLASS,
+            &DressingStyle {
+                use_system_accent: true,
+                ..style(&face)
+            },
+        );
+        assert!(!css.contains("--accent"), "{css}");
+
+        for (dark, foreground) in [
+            (true, face.titlebar_foreground),
+            (false, face.titlebar_background),
+        ] {
+            let css = dressing_css(
+                CLASS,
+                &DressingStyle {
+                    dark,
+                    ..style(&face)
+                },
+            );
+            // 85% palette blue over 15% background, spelled out so a
+            // swapped mix() argument order cannot pass.
+            let (accent, bg) = (face.indexed[4], face.background);
+            let channel = |a: f32, b: f32| 0.85 * a + 0.15 * b;
+            let background = gdk::RGBA::new(
+                channel(accent.red(), bg.red()),
+                channel(accent.green(), bg.green()),
+                channel(accent.blue(), bg.blue()),
+                1.0,
+            );
+            let expected = format!(
+                "window.ptyxis-tab-1 {{ --accent-fg-color: {foreground}; --accent-bg-color: {background}; }}"
+            );
+            assert!(css.contains(&expected), "dark={dark}: {css}");
+        }
+    }
+
+    #[test]
+    fn transparency_helper() {
+        let color = gdk::RGBA::new(0.1, 0.2, 0.3, 0.5);
+        assert_eq!(with_alpha(&color, 0.5), gdk::RGBA::new(0.1, 0.2, 0.3, 0.25));
+        assert_eq!(with_alpha(&color, 1.0), color);
+    }
+}

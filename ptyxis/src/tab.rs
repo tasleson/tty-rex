@@ -26,7 +26,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use adw::prelude::*;
@@ -35,15 +34,16 @@ use relm4::actions::RelmAction;
 use relm4::prelude::*;
 use vte::prelude::*;
 
+use crate::dressing::{Dressing, DressingStyle};
 use crate::inspector::{Inspector, InspectorInit};
 use crate::leader::{self, LeaderKind};
-use crate::palette::{self, Face};
+use crate::palette;
 use crate::profile::Profile;
 use crate::settings::{self, AppSettings, ExitAction};
 use crate::spawn::{ChildExit, SpawnError, SpawnRequest, Spawner};
 use crate::terminal::{self, ZoomLevel};
 use crate::title_dialog::{SET_TITLE_LABEL, TitleDialog};
-use crate::window::{SetTitleAction, WINDOW_CONTENTS_CLASS};
+use crate::window::SetTitleAction;
 
 /// Exits faster than this without user input are treated as failures so the
 /// error stays visible (see `ptyxis_tab_wait_cb()`).
@@ -60,9 +60,6 @@ pub const EDIT_PROFILE_ACTION: &str = "app.edit-profile";
 const POLL_DELAY_INTERACTIVE: Duration = Duration::from_millis(100);
 const POLL_DELAY_MIN: Duration = Duration::from_millis(500);
 const POLL_DELAY_MAX: Duration = Duration::from_secs(10);
-
-/// Prefix of the CSS class that marks the window showing a given tab.
-const DRESSING_CLASS_PREFIX: &str = "ptyxis-tab-";
 
 /// What the banner button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,25 +153,6 @@ pub fn compose_title(
     title
 }
 
-/// The CSS highlighting the window while `kind` leads the terminal, for the
-/// window carrying `css_class` (the superuser/remote rules of
-/// `ptyxis_window_dressing_update()`). Empty when there is nothing to show.
-pub fn leader_css(css_class: &str, kind: LeaderKind, face: &Face) -> String {
-    let scarf = match kind {
-        LeaderKind::Superuser => face.superuser,
-        LeaderKind::Remote => face.remote,
-        LeaderKind::Unknown | LeaderKind::Container => return String::new(),
-    };
-    let style = format!(
-        "{{ background-color: {}; color: {}; }}",
-        scarf.background, scarf.foreground
-    );
-    format!(
-        "window.{css_class} toolbarview.{WINDOW_CONTENTS_CLASS} > revealer.top-bar > windowhandle {style}\n\
-         window.{css_class} toolbarview.{WINDOW_CONTENTS_CLASS} headerbar {style}\n"
-    )
-}
-
 /// Whether a key press likely starts or ends a program, so the leader
 /// should be checked soon (`ptyxis_tab_monitor_key_pressed_cb()`).
 fn is_interactive_key(key: gdk::Key, state: gdk::ModifierType) -> bool {
@@ -258,51 +236,6 @@ impl LeaderMonitor {
         self.stopped.set(true);
         if let Some((id, _)) = self.pending.borrow_mut().take() {
             id.remove();
-        }
-    }
-}
-
-/// A CSS provider coloring the window while this tab is the selected one.
-struct Dressing {
-    css_class: String,
-    provider: gtk::CssProvider,
-    /// The CSS last loaded, to skip needless restyling.
-    css: String,
-}
-
-impl Dressing {
-    fn new() -> Self {
-        static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-        let provider = gtk::CssProvider::new();
-        if let Some(display) = gdk::Display::default() {
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
-            );
-        }
-        Self {
-            css_class: format!(
-                "{DRESSING_CLASS_PREFIX}{}",
-                NEXT_ID.fetch_add(1, Ordering::Relaxed)
-            ),
-            provider,
-            css: String::new(),
-        }
-    }
-
-    fn load(&mut self, css: String) {
-        if css != self.css {
-            self.provider.load_from_string(&css);
-            self.css = css;
-        }
-    }
-}
-
-impl Drop for Dressing {
-    fn drop(&mut self) {
-        if let Some(display) = gdk::Display::default() {
-            gtk::style_context_remove_provider_for_display(&display, &self.provider);
         }
     }
 }
@@ -453,28 +386,25 @@ impl Tab {
 
     /// The CSS class a window carries while this tab is selected in it.
     pub fn css_class(&self) -> &str {
-        &self.dressing.css_class
+        self.dressing.css_class()
     }
 
-    /// Reloads the window highlight for the current leader, palette,
-    /// appearance and `visual-process-leader` setting.
+    /// Restyles the window for the current palette, appearance, opacity,
+    /// leader and `visual-process-leader` setting.
     fn update_dressing(&mut self) {
-        let highlighted = matches!(self.leader_kind, LeaderKind::Superuser | LeaderKind::Remote);
-        let css = if highlighted && self.app_settings.visual_process_leader() {
-            let dark = adw::StyleManager::default().is_dark();
-            palette::lookup_or_default(&self.profile.palette_id())
-                .map(|palette| {
-                    leader_css(
-                        &self.dressing.css_class,
-                        self.leader_kind,
-                        palette.face(dark),
-                    )
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
+        let palette_id = self.profile.palette_id();
+        let Some(palette) = palette::lookup_or_default(&palette_id) else {
+            return;
         };
-        self.dressing.load(css);
+        let dark = adw::StyleManager::default().is_dark();
+        self.dressing.update(&DressingStyle {
+            face: palette.face(dark),
+            dark,
+            opacity: self.profile.opacity(),
+            leader: self.leader_kind,
+            visual_process_leader: self.app_settings.visual_process_leader(),
+            use_system_accent: palette.use_system_accent(),
+        });
     }
 
     /// Records a new leader; returns whether it changed.
@@ -745,6 +675,7 @@ impl Component for Tab {
             dressing: Dressing::new(),
             shared_handlers,
         };
+        model.update_dressing();
         model.respawn(&sender);
 
         ComponentParts { model, widgets: () }
@@ -985,33 +916,6 @@ mod tests {
                 expected,
                 "{key:?} {state:?}"
             );
-        }
-    }
-
-    #[test]
-    fn leader_highlight_css() {
-        let palette = palette::lookup_or_default(palette::DEFAULT_PALETTE_ID).unwrap();
-        let face = palette.face(true);
-        assert_eq!(leader_css("ptyxis-tab-1", LeaderKind::Unknown, face), "");
-        assert_eq!(leader_css("ptyxis-tab-1", LeaderKind::Container, face), "");
-        for (kind, scarf) in [
-            (LeaderKind::Superuser, face.superuser),
-            (LeaderKind::Remote, face.remote),
-        ] {
-            let css = leader_css("ptyxis-tab-1", kind, face);
-            let style = format!(
-                "{{ background-color: {}; color: {}; }}",
-                scarf.background, scarf.foreground
-            );
-            for selector in [
-                "window.ptyxis-tab-1 toolbarview.window-contents > revealer.top-bar > windowhandle",
-                "window.ptyxis-tab-1 toolbarview.window-contents headerbar",
-            ] {
-                assert!(
-                    css.contains(&format!("{selector} {style}")),
-                    "{kind:?}: {css}"
-                );
-            }
         }
     }
 

@@ -67,6 +67,9 @@ pub fn create() -> vte::Terminal {
     terminal.set_enable_fallback_scrolling(false);
     terminal.set_scroll_unit_is_pixels(true);
     terminal.set_allow_hyperlink(true);
+    // The window paints the background (see `dressing`), which lets
+    // profile opacity show through like the C build.
+    terminal.set_clear_background(false);
     terminal.set_hexpand(true);
     terminal.set_vexpand(true);
     terminal

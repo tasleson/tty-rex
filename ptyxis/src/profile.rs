@@ -248,6 +248,11 @@ impl Profile {
         self.settings.double(key::CELL_WIDTH_SCALE)
     }
 
+    /// Opacity of the window background (`ptyxis_profile_get_opacity()`).
+    pub fn opacity(&self) -> f64 {
+        self.settings.double(key::OPACITY).clamp(0.0, 1.0)
+    }
+
     pub fn backspace_binding(&self) -> EraseBinding {
         EraseBinding::from_nick_or_default(&self.settings.string(key::BACKSPACE_BINDING))
     }
