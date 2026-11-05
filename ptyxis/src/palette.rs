@@ -44,6 +44,7 @@ const GROUP_LIGHT: &str = "Light";
 const GROUP_DARK: &str = "Dark";
 const KEY_NAME: &str = "Name";
 const KEY_PRIMARY: &str = "Primary";
+const KEY_USE_SYSTEM_ACCENT: &str = "UseSystemAccent";
 const KEY_FOREGROUND: &str = "Foreground";
 const KEY_BACKGROUND: &str = "Background";
 const KEY_CURSOR: &str = "Cursor";
@@ -51,6 +52,8 @@ const KEY_CURSOR_BACKGROUND: &str = "CursorBackground";
 const KEY_CURSOR_FOREGROUND: &str = "CursorForeground";
 const KEY_TITLEBAR_FOREGROUND: &str = "TitlebarForeground";
 const KEY_TITLEBAR_BACKGROUND: &str = "TitlebarBackground";
+const KEY_BELL_FOREGROUND: &str = "BellForeground";
+const KEY_BELL_BACKGROUND: &str = "BellBackground";
 const KEY_SUPERUSER_FOREGROUND: &str = "SuperuserForeground";
 const KEY_SUPERUSER_BACKGROUND: &str = "SuperuserBackground";
 const KEY_REMOTE_FOREGROUND: &str = "RemoteForeground";
@@ -59,6 +62,8 @@ const KEY_REMOTE_BACKGROUND: &str = "RemoteBackground";
 /// Indexed colors the superuser and remote highlights derive from when a
 /// palette does not set them (red and bright blue).
 const SUPERUSER_BASE_INDEX: usize = 1;
+/// Indexed color (yellow) the visual bell derives from.
+const BELL_BASE_INDEX: usize = 11;
 const REMOTE_BASE_INDEX: usize = 12;
 
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +109,8 @@ pub struct Face {
     pub cursor_background: Option<gdk::RGBA>,
     pub cursor_foreground: Option<gdk::RGBA>,
     pub indexed: [gdk::RGBA; N_INDEXED_COLORS],
+    /// Colors flashed by the visual bell and used for banners.
+    pub visual_bell: Scarf,
     pub superuser: Scarf,
     pub remote: Scarf,
 }
@@ -113,6 +120,7 @@ pub struct Palette {
     id: String,
     name: String,
     primary: bool,
+    use_system_accent: bool,
     has_light: bool,
     has_dark: bool,
     light: Face,
@@ -279,6 +287,14 @@ impl FaceReader<'_> {
                 background
             }
         });
+        let visual_bell = Scarf {
+            foreground: self
+                .optional(KEY_BELL_FOREGROUND)?
+                .unwrap_or(titlebar_foreground),
+            background: self
+                .optional(KEY_BELL_BACKGROUND)?
+                .unwrap_or_else(|| mix(&indexed[BELL_BASE_INDEX], &titlebar_background, 0.25)),
+        };
         let scarf = |fg_key, bg_key, base: usize| -> Result<Scarf, PaletteError> {
             Ok(Scarf {
                 foreground: self
@@ -308,6 +324,7 @@ impl FaceReader<'_> {
             cursor_background,
             cursor_foreground,
             indexed,
+            visual_bell,
             superuser,
             remote,
         })
@@ -366,6 +383,9 @@ impl Palette {
             primary: key_file
                 .boolean(GROUP_PALETTE, KEY_PRIMARY)
                 .unwrap_or(false),
+            use_system_accent: key_file
+                .boolean(GROUP_PALETTE, KEY_USE_SYSTEM_ACCENT)
+                .unwrap_or(false),
             has_light,
             has_dark,
             light,
@@ -383,6 +403,12 @@ impl Palette {
 
     pub fn is_primary(&self) -> bool {
         self.primary
+    }
+
+    /// Whether the desktop accent color is kept instead of one derived
+    /// from the palette.
+    pub fn use_system_accent(&self) -> bool {
+        self.use_system_accent
     }
 
     pub fn has_light(&self) -> bool {
@@ -598,6 +624,8 @@ mod tests {
         let palette = lookup_builtin(DEFAULT_PALETTE_ID).expect("gnome palette is bundled");
         assert_eq!(palette.name(), "GNOME");
         assert!(palette.is_primary());
+        assert!(palette.use_system_accent());
+        assert!(!lookup_builtin("tango").unwrap().use_system_accent());
         assert!(palette.has_light() && palette.has_dark());
         let dark = palette.face(true);
         assert_eq!(dark.background, gdk::RGBA::parse("#1c1c1f").unwrap());
@@ -820,6 +848,22 @@ mod tests {
             &face.titlebar_foreground,
             "superuser foreground",
         );
+        assert_eq!(face.visual_bell.foreground, face.titlebar_foreground);
+        assert_close(
+            &face.visual_bell.background,
+            // 25% yellow over 75% title bar, spelled out per channel.
+            &{
+                let (yellow, bar) = (face.indexed[11], face.titlebar_background);
+                let channel = |y: f32, b: f32| 0.25 * y + 0.75 * b;
+                gdk::RGBA::new(
+                    channel(yellow.red(), bar.red()),
+                    channel(yellow.green(), bar.green()),
+                    channel(yellow.blue(), bar.blue()),
+                    1.0,
+                )
+            },
+            "bell background",
+        );
 
         let light = data.replace("Background=#000000", "Background=#ffffff");
         let face = Palette::parse("l", "l", &light)
@@ -844,14 +888,19 @@ mod tests {
         let data = format!(
             "[Palette]\nName=S\n{MINIMAL_COLORS}SuperuserForeground=#010101\n\
              SuperuserBackground=#020202\nRemoteForeground=#030303\n\
-             RemoteBackground=#040404\nTitlebarBackground=#050505\n"
+             RemoteBackground=#040404\nTitlebarBackground=#050505\n\
+             BellForeground=#060606\nBellBackground=#070707\nUseSystemAccent=true\n"
         );
+        let palette = Palette::parse("s", "s", &data).unwrap();
+        assert!(palette.use_system_accent());
         let face = Palette::parse("s", "s", &data).unwrap().face(true).clone();
         assert_eq!(face.superuser.foreground, rgba("#010101"));
         assert_eq!(face.superuser.background, rgba("#020202"));
         assert_eq!(face.remote.foreground, rgba("#030303"));
         assert_eq!(face.remote.background, rgba("#040404"));
         assert_eq!(face.titlebar_background, rgba("#050505"));
+        assert_eq!(face.visual_bell.foreground, rgba("#060606"));
+        assert_eq!(face.visual_bell.background, rgba("#070707"));
 
         // Malformed optional colors fall back to the defaults.
         let bad = format!("[Palette]\nName=S\n{MINIMAL_COLORS}RemoteBackground=nope\n");
