@@ -38,3 +38,4 @@ pub mod config;
 pub mod palette;
 pub mod profile;
 pub mod settings;
+pub mod spawn;

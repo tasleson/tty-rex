@@ -1,0 +1,650 @@
+// spawn.rs
+//
+// Copyright 2023 Christian Hergert <christian@sourceandstack.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Process spawning behind a backend boundary.
+//!
+//! The C implementation spawns everything through `ptyxis-agent` over
+//! D-Bus (`agent/org.gnome.Ptyxis.Agent.xml`), which also handles
+//! containers. The port currently ships only [`HostSpawner`], which runs
+//! the user's shell on the host through VTE, but tabs only talk to the
+//! [`Spawner`] trait so an agent-backed implementation can replace it
+//! without touching the UI.
+//!
+//! Command-line construction mirrors `ptyxis_client_spawn_async()` in
+//! `src/ptyxis-client.c` and is kept pure so it can be unit tested.
+//!
+//! An agent-backed spawner will need more than the trait carries today:
+//! the target container id (the agent's `CreateProcess` runs inside a
+//! container), extra environment such as proxy settings, and a way to
+//! cancel an in-flight spawn when the tab closes first.
+
+use std::cell::{OnceCell, RefCell};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
+use std::process::Command;
+use std::rc::Rc;
+
+use gtk::{gio, glib};
+use vte::prelude::*;
+
+use crate::config;
+use crate::settings::PreserveDirectory;
+
+/// Used when no usable shell could be discovered; identical to the C
+/// fallback so NSS-provided login shells still work.
+const FALLBACK_SHELL_ARGV: [&str; 3] = [
+    "sh",
+    "-c",
+    "if [ -x \"$(getent passwd $(whoami) | cut -d : -f 7)\" ]; then exec $(getent passwd $(whoami) | cut -d : -f 7); else exec sh; fi",
+];
+
+/// Shells recognized without consulting `/etc/shells` (`ptyxis_is_shell()`).
+const BUILTIN_SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "fish", "tcsh", "csh", "tmux"];
+
+/// Shells known to accept `-l` (`ptyxis_shell_supports_dash_l()`).
+const DASH_L_SHELLS: &[&str] = &["bash", "fish", "zsh", "dash", "tcsh", "sh"];
+
+const ETC_SHELLS: &str = "/etc/shells";
+const LOGIN_FLAG: &str = "-l";
+
+#[derive(Debug, thiserror::Error)]
+pub enum SpawnError {
+    #[error("Failed to parse custom command “{command}”: {source}")]
+    InvalidCustomCommand {
+        command: String,
+        source: glib::Error,
+    },
+    #[error("{0}")]
+    Spawn(#[from] glib::Error),
+}
+
+/// What a tab wants to run. Backends decide how to turn it into a process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpawnRequest {
+    /// Explicit argv (e.g. from `ptyxis -x`); overrides the profile.
+    pub command: Option<Vec<String>>,
+    /// The profile's custom command, if enabled.
+    pub custom_command: Option<String>,
+    pub login_shell: bool,
+    pub preserve_directory: PreserveDirectory,
+    /// Working directory as a URI (initial or inherited from another tab).
+    pub cwd_uri: Option<String>,
+    pub profile_uuid: String,
+}
+
+/// A fully resolved process to execute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnPlan {
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+}
+
+/// How a child process terminated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildExit {
+    Exited(i32),
+    Signaled(i32),
+}
+
+impl ChildExit {
+    /// Decodes a `waitpid()` status as delivered by VTE's `child-exited`.
+    pub fn from_wait_status(status: i32) -> Self {
+        let status = std::process::ExitStatus::from_raw(status);
+        match (status.code(), status.signal()) {
+            (Some(code), _) => Self::Exited(code),
+            (None, Some(signal)) => Self::Signaled(signal),
+            // Stopped/continued statuses are never reported for exits.
+            (None, None) => Self::Exited(-1),
+        }
+    }
+
+    pub fn is_success(self) -> bool {
+        self == Self::Exited(0)
+    }
+}
+
+fn basename(arg0: &str) -> &str {
+    arg0.rsplit('/').next().unwrap_or(arg0)
+}
+
+/// Whether `arg0` names a shell, by builtin name or `/etc/shells` entry.
+pub fn is_shell_in(arg0: &str, configured_shells: &[String]) -> bool {
+    BUILTIN_SHELLS.contains(&basename(arg0)) || configured_shells.iter().any(|s| s == arg0)
+}
+
+/// Parses `/etc/shells`, skipping blank lines and comments.
+pub fn parse_etc_shells(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+pub fn shell_supports_dash_l(shell: &str) -> bool {
+    DASH_L_SHELLS.contains(&basename(shell))
+}
+
+/// Extracts the local path from a working directory URI (or plain path).
+pub fn path_from_uri(uri: &str) -> Option<String> {
+    if uri.starts_with('/') {
+        return Some(uri.to_owned());
+    }
+    glib::filename_from_uri(uri)
+        .ok()
+        .map(|(path, _host)| path.to_string_lossy().into_owned())
+}
+
+/// Builds the argv and working directory for `request`.
+///
+/// `default_shell` is the discovered login shell, if any; `is_shell`
+/// decides whether a program is a shell (and thus safe to start in an
+/// inherited directory).
+pub fn build_plan(
+    request: &SpawnRequest,
+    default_shell: Option<&str>,
+    is_shell: impl Fn(&str) -> bool,
+) -> Result<SpawnPlan, SpawnError> {
+    let mut preserve_directory_safe = false;
+    let explicit_command = request.command.as_ref().filter(|argv| !argv.is_empty());
+
+    let (mut argv, arg0) = if let Some(command) = explicit_command {
+        (command.clone(), None)
+    } else if let Some(custom) = &request.custom_command {
+        let argv: Vec<String> = glib::shell_parse_argv(custom.as_str())
+            .map_err(|source| SpawnError::InvalidCustomCommand {
+                command: custom.clone(),
+                source,
+            })?
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let arg0 = argv.first().cloned();
+        (argv, arg0)
+    } else if let Some(shell) = default_shell.filter(|s| !s.is_empty()) {
+        (vec![shell.to_owned()], Some(shell.to_owned()))
+    } else {
+        preserve_directory_safe = true;
+        (FALLBACK_SHELL_ARGV.map(str::to_owned).to_vec(), None)
+    };
+
+    if let Some(arg0) = &arg0 {
+        preserve_directory_safe |= is_shell(arg0);
+        if request.login_shell && shell_supports_dash_l(arg0) {
+            argv.push(LOGIN_FLAG.to_owned());
+        }
+    }
+
+    let requested_path = request.cwd_uri.as_deref().and_then(path_from_uri);
+    let cwd = if explicit_command.is_some() && requested_path.is_some() {
+        requested_path
+    } else {
+        match request.preserve_directory {
+            PreserveDirectory::Never => None,
+            PreserveDirectory::Safe if !preserve_directory_safe => None,
+            PreserveDirectory::Safe | PreserveDirectory::Always => requested_path,
+        }
+    };
+
+    Ok(SpawnPlan { argv, cwd })
+}
+
+/// Called once with the spawn result.
+pub type SpawnCallback = Box<dyn FnOnce(Result<glib::Pid, SpawnError>)>;
+/// Called once when a successfully spawned process terminates.
+pub type ExitCallback = Box<dyn FnOnce(ChildExit)>;
+
+/// A backend able to run a [`SpawnRequest`] inside a terminal's PTY.
+pub trait Spawner {
+    fn spawn(
+        &self,
+        terminal: &vte::Terminal,
+        request: &SpawnRequest,
+        on_spawned: SpawnCallback,
+        on_exit: ExitCallback,
+    );
+}
+
+/// Extracts the login shell field from a `passwd` entry.
+pub fn parse_passwd_shell(entry: &str) -> Option<&str> {
+    entry
+        .lines()
+        .next()?
+        .split(':')
+        .nth(6)
+        .map(str::trim)
+        .filter(|shell| !shell.is_empty())
+}
+
+fn is_executable(path: &str) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Host facts needed to build a plan; gathering them touches the
+/// filesystem and runs `getent`, so it happens off the main thread.
+#[derive(Debug, Clone, Default)]
+struct HostShellInfo {
+    user_shell: Option<String>,
+    configured_shells: Vec<String>,
+}
+
+/// Discovers the user's login shell like the agent does: the passwd
+/// entry first (via `getent`, so NSS sources work), then `$SHELL`.
+fn discover_user_shell() -> Option<String> {
+    let user = glib::user_name();
+    let from_passwd = Command::new("getent")
+        .arg("passwd")
+        .arg(&user)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            parse_passwd_shell(&stdout).map(str::to_owned)
+        });
+
+    from_passwd
+        .into_iter()
+        .chain(std::env::var("SHELL").ok())
+        .find(|shell| is_executable(shell))
+}
+
+fn discover_host_shell_info() -> HostShellInfo {
+    HostShellInfo {
+        user_shell: discover_user_shell(),
+        configured_shells: std::fs::read_to_string(ETC_SHELLS)
+            .map(|contents| parse_etc_shells(&contents))
+            .unwrap_or_default(),
+    }
+}
+
+/// Returns the cached host shell info, discovering it on a worker thread
+/// the first time. Concurrent first calls may each discover; that is
+/// harmless and rare.
+async fn host_shell_info() -> HostShellInfo {
+    thread_local! {
+        static INFO: OnceCell<HostShellInfo> = const { OnceCell::new() };
+    }
+    if let Some(info) = INFO.with(|cell| cell.get().cloned()) {
+        return info;
+    }
+    let info = gio::spawn_blocking(discover_host_shell_info)
+        .await
+        .unwrap_or_else(|_| {
+            glib::g_warning!("Ptyxis", "Shell discovery failed; using fallback shell");
+            HostShellInfo::default()
+        });
+    INFO.with(|cell| cell.get_or_init(|| info).clone())
+}
+
+fn vte_version_number() -> u32 {
+    // SAFETY: these functions only return compile-time constants of the
+    // loaded libvte and have no preconditions.
+    let (major, minor, micro) = unsafe {
+        (
+            vte::ffi::vte_get_major_version(),
+            vte::ffi::vte_get_minor_version(),
+            vte::ffi::vte_get_micro_version(),
+        )
+    };
+    major * 10_000 + minor * 100 + micro
+}
+
+/// Environment additions for child processes, as set by the C client.
+pub fn child_environment(profile_uuid: &str, vte_version: u32) -> Vec<String> {
+    vec![
+        format!("PTYXIS_PROFILE={profile_uuid}"),
+        format!("PTYXIS_VERSION={}", config::PACKAGE_VERSION),
+        "COLORTERM=truecolor".to_owned(),
+        "TERM=xterm-256color".to_owned(),
+        format!("VTE_VERSION={vte_version}"),
+    ]
+}
+
+/// Spawns processes directly on the host using `vte_terminal_spawn_async()`.
+#[derive(Debug, Default)]
+pub struct HostSpawner;
+
+impl Spawner for HostSpawner {
+    fn spawn(
+        &self,
+        terminal: &vte::Terminal,
+        request: &SpawnRequest,
+        on_spawned: SpawnCallback,
+        on_exit: ExitCallback,
+    ) {
+        let weak_terminal = terminal.downgrade();
+        let request = request.clone();
+        glib::spawn_future_local(async move {
+            let info = host_shell_info().await;
+            // The tab may have closed while the shell was being discovered.
+            if let Some(terminal) = weak_terminal.upgrade() {
+                spawn_on_host(&terminal, &request, &info, on_spawned, on_exit);
+            }
+        });
+    }
+}
+
+fn spawn_on_host(
+    terminal: &vte::Terminal,
+    request: &SpawnRequest,
+    info: &HostShellInfo,
+    on_spawned: SpawnCallback,
+    on_exit: ExitCallback,
+) {
+    let plan = match build_plan(request, info.user_shell.as_deref(), |arg0| {
+        is_shell_in(arg0, &info.configured_shells)
+    }) {
+        Ok(plan) => plan,
+        Err(e) => {
+            on_spawned(Err(e));
+            return;
+        }
+    };
+
+    let argv: Vec<&str> = plan.argv.iter().map(String::as_str).collect();
+    let env = child_environment(&request.profile_uuid, vte_version_number());
+    let env: Vec<&str> = env.iter().map(String::as_str).collect();
+    let cwd = plan
+        .cwd
+        .filter(|dir| Path::new(dir).is_dir())
+        .or_else(|| glib::home_dir().to_str().map(str::to_owned));
+
+    let weak_terminal = terminal.downgrade();
+    terminal.spawn_async(
+        vte::PtyFlags::DEFAULT,
+        cwd.as_deref(),
+        &argv,
+        &env,
+        glib::SpawnFlags::SEARCH_PATH,
+        || {},
+        -1,
+        None::<&gio::Cancellable>,
+        move |result| {
+            let result = result.map_err(SpawnError::from);
+            if result.is_ok()
+                && let Some(terminal) = weak_terminal.upgrade()
+            {
+                watch_child_exit(&terminal, on_exit);
+            }
+            on_spawned(result);
+        },
+    );
+}
+
+/// Delivers the next `child-exited` emission to `on_exit` exactly once.
+fn watch_child_exit(terminal: &vte::Terminal, on_exit: ExitCallback) {
+    let handler = Rc::new(RefCell::new(None::<glib::SignalHandlerId>));
+    let on_exit = RefCell::new(Some(on_exit));
+    let handler_slot = Rc::clone(&handler);
+    let id = terminal.connect_child_exited(move |terminal, status| {
+        if let Some(id) = handler_slot.borrow_mut().take() {
+            terminal.disconnect(id);
+        }
+        if let Some(on_exit) = on_exit.borrow_mut().take() {
+            on_exit(ChildExit::from_wait_status(status));
+        }
+    });
+    *handler.borrow_mut() = Some(id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn always_shell(_: &str) -> bool {
+        true
+    }
+
+    fn never_shell(_: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn argv_selection() {
+        struct Case {
+            name: &'static str,
+            request: SpawnRequest,
+            default_shell: Option<&'static str>,
+            expected: Vec<String>,
+        }
+        let cases = [
+            Case {
+                name: "default shell",
+                request: SpawnRequest::default(),
+                default_shell: Some("/bin/bash"),
+                expected: strings(&["/bin/bash"]),
+            },
+            Case {
+                name: "login shell",
+                request: SpawnRequest {
+                    login_shell: true,
+                    ..Default::default()
+                },
+                default_shell: Some("/usr/bin/zsh"),
+                expected: strings(&["/usr/bin/zsh", "-l"]),
+            },
+            Case {
+                name: "login flag only for known shells",
+                request: SpawnRequest {
+                    login_shell: true,
+                    ..Default::default()
+                },
+                default_shell: Some("/usr/bin/nu"),
+                expected: strings(&["/usr/bin/nu"]),
+            },
+            Case {
+                name: "custom command is shell parsed",
+                request: SpawnRequest {
+                    custom_command: Some("tmux new -s 'my session'".into()),
+                    ..Default::default()
+                },
+                default_shell: Some("/bin/bash"),
+                expected: strings(&["tmux", "new", "-s", "my session"]),
+            },
+            Case {
+                name: "explicit command wins and never gets -l",
+                request: SpawnRequest {
+                    command: Some(strings(&["bash", "-c", "sleep 3"])),
+                    custom_command: Some("fish".into()),
+                    login_shell: true,
+                    ..Default::default()
+                },
+                default_shell: Some("/bin/bash"),
+                expected: strings(&["bash", "-c", "sleep 3"]),
+            },
+            Case {
+                name: "empty explicit command falls back to shell",
+                request: SpawnRequest {
+                    command: Some(vec![]),
+                    ..Default::default()
+                },
+                default_shell: Some("/bin/bash"),
+                expected: strings(&["/bin/bash"]),
+            },
+            Case {
+                name: "no shell known",
+                request: SpawnRequest::default(),
+                default_shell: None,
+                expected: strings(&FALLBACK_SHELL_ARGV),
+            },
+        ];
+        for case in cases {
+            let plan = build_plan(&case.request, case.default_shell, always_shell)
+                .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+            assert_eq!(plan.argv, case.expected, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn invalid_custom_command_is_reported() {
+        let request = SpawnRequest {
+            custom_command: Some("echo 'unterminated".into()),
+            ..Default::default()
+        };
+        let err = build_plan(&request, None, always_shell).unwrap_err();
+        assert!(err.to_string().contains("echo 'unterminated"), "{err}");
+    }
+
+    #[test]
+    fn working_directory_policy() {
+        let uri = Some("file:///home/user/src".to_owned());
+        let dir = Some("/home/user/src".to_owned());
+        let cmd = Some(strings(&["vim"]));
+        type Case = (
+            &'static str,
+            PreserveDirectory,
+            Option<Vec<String>>,
+            bool,
+            Option<String>,
+        );
+        let cases: Vec<Case> = vec![
+            ("never", PreserveDirectory::Never, None, true, None),
+            (
+                "always",
+                PreserveDirectory::Always,
+                None,
+                false,
+                dir.clone(),
+            ),
+            (
+                "safe with shell",
+                PreserveDirectory::Safe,
+                None,
+                true,
+                dir.clone(),
+            ),
+            (
+                "safe without shell",
+                PreserveDirectory::Safe,
+                None,
+                false,
+                None,
+            ),
+            (
+                "explicit command",
+                PreserveDirectory::Never,
+                cmd,
+                false,
+                dir.clone(),
+            ),
+        ];
+        for (name, preserve, command, shell, expected) in cases {
+            let request = SpawnRequest {
+                command,
+                preserve_directory: preserve,
+                cwd_uri: uri.clone(),
+                ..Default::default()
+            };
+            let is_shell = if shell { always_shell } else { never_shell };
+            let plan = build_plan(&request, Some("/bin/bash"), is_shell).unwrap();
+            assert_eq!(plan.cwd, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn fallback_shell_counts_as_safe() {
+        let request = SpawnRequest {
+            cwd_uri: Some("file:///tmp".into()),
+            ..Default::default()
+        };
+        let plan = build_plan(&request, None, never_shell).unwrap();
+        assert_eq!(plan.cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn uri_paths() {
+        let cases = [
+            ("file:///tmp/a%20b", Some("/tmp/a b")),
+            ("/already/a/path", Some("/already/a/path")),
+            ("sftp://host/tmp", None),
+            ("not a uri", None),
+        ];
+        for (uri, expected) in cases {
+            assert_eq!(path_from_uri(uri).as_deref(), expected, "{uri}");
+        }
+    }
+
+    #[test]
+    fn shell_detection() {
+        let configured = parse_etc_shells("# comment\n/bin/bash\n\n  /usr/bin/nu  \n");
+        assert_eq!(configured, strings(&["/bin/bash", "/usr/bin/nu"]));
+        let cases = [
+            ("bash", true),
+            ("/usr/local/bin/fish", true),
+            ("tmux", true),
+            ("/usr/bin/nu", true),
+            ("nu", false),
+            ("vim", false),
+        ];
+        for (arg0, expected) in cases {
+            assert_eq!(is_shell_in(arg0, &configured), expected, "{arg0}");
+        }
+    }
+
+    #[test]
+    fn passwd_parsing() {
+        let cases = [
+            (
+                "tony:x:1000:1000:Tony:/home/tony:/bin/zsh\n",
+                Some("/bin/zsh"),
+            ),
+            ("root:x:0:0:root:/root:\n", None),
+            ("short:x:1", None),
+            ("", None),
+        ];
+        for (entry, expected) in cases {
+            assert_eq!(parse_passwd_shell(entry), expected, "{entry:?}");
+        }
+    }
+
+    #[test]
+    fn wait_status_decoding() {
+        let cases = [
+            (0, ChildExit::Exited(0)),
+            (1 << 8, ChildExit::Exited(1)),
+            (9, ChildExit::Signaled(9)),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(ChildExit::from_wait_status(status), expected);
+        }
+        assert!(ChildExit::Exited(0).is_success());
+        assert!(!ChildExit::Signaled(15).is_success());
+    }
+
+    #[test]
+    fn environment_matches_c_client() {
+        let env = child_environment("abc", 8401);
+        for expected in [
+            "PTYXIS_PROFILE=abc",
+            "COLORTERM=truecolor",
+            "TERM=xterm-256color",
+            "VTE_VERSION=8401",
+            &format!("PTYXIS_VERSION={}", config::PACKAGE_VERSION),
+        ] {
+            assert!(env.iter().any(|e| e == expected), "{expected}");
+        }
+    }
+}
