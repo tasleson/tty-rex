@@ -48,4 +48,5 @@ pub mod shortcuts;
 pub mod spawn;
 pub mod tab;
 pub mod terminal;
+pub mod theme_selector;
 pub mod window;

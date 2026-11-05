@@ -257,6 +257,61 @@ impl Window {
     }
 }
 
+/// Adds `win.interface-style` and the theme selector to the primary menu
+/// (`ptyxis_window_add_theme_controls()`). The action state is the
+/// `AdwColorScheme` nick the C property action uses.
+fn add_theme_controls(
+    window: &adw::ApplicationWindow,
+    menu_button: &gtk::MenuButton,
+    settings: &crate::settings::AppSettings,
+) {
+    use crate::theme_selector::{color_scheme_nick, style_for_color_scheme_nick, theme_selector};
+
+    let state = color_scheme_nick(settings.interface_style()).to_variant();
+    let action = gio::SimpleAction::new_stateful(
+        INTERFACE_STYLE_ITEM,
+        Some(glib::VariantTy::STRING),
+        &state,
+    );
+    let gsettings = settings.gsettings().clone();
+    action.connect_activate(move |_, target| {
+        let Some(style) = target
+            .and_then(|t| t.str())
+            .and_then(style_for_color_scheme_nick)
+        else {
+            return;
+        };
+        if let Err(e) = gsettings.set_string(crate::settings::key::INTERFACE_STYLE, style.nick()) {
+            glib::g_warning!("Ptyxis", "Failed to save interface style: {e}");
+        }
+    });
+    let weak_action = action.downgrade();
+    let settings_for_state = settings.clone();
+    let id = settings.gsettings().connect_changed(
+        Some(crate::settings::key::INTERFACE_STYLE),
+        move |_, _| {
+            if let Some(action) = weak_action.upgrade() {
+                action.set_state(
+                    &color_scheme_nick(settings_for_state.interface_style()).to_variant(),
+                );
+            }
+        },
+    );
+    let gsettings = settings.gsettings().clone();
+    let id = std::cell::Cell::new(Some(id));
+    window.connect_destroy(move |_| {
+        if let Some(id) = id.take() {
+            gsettings.disconnect(id);
+        }
+    });
+    window.add_action(&action);
+
+    let action_name = format!("win.{INTERFACE_STYLE_ITEM}");
+    if let Some(popover) = menu_button.popover().and_downcast::<gtk::PopoverMenu>() {
+        popover.add_child(&theme_selector(&action_name), INTERFACE_STYLE_ITEM);
+    }
+}
+
 /// Forgets all tabs of a window that is going away.
 fn release_tabs(app: &App, tab_view: &adw::TabView) {
     for i in 0..tab_view.n_pages() {
@@ -264,8 +319,16 @@ fn release_tabs(app: &App, tab_view: &adw::TabView) {
     }
 }
 
+/// Custom menu item id where the theme selector is placed.
+const INTERFACE_STYLE_ITEM: &str = "interface-style";
+
 fn build_primary_menu() -> gio::Menu {
     let menu = gio::Menu::new();
+    let section = gio::Menu::new();
+    let theme = gio::MenuItem::new(None, None);
+    theme.set_attribute_value("custom", Some(&INTERFACE_STYLE_ITEM.to_variant()));
+    section.append_item(&theme);
+    menu.append_section(None, &section);
     let section = gio::Menu::new();
     section.append_item(&RelmAction::<NewWindowAction>::to_menu_item("New _Window"));
     section.append_item(&RelmAction::<CloseTabAction>::to_menu_item("_Close Tab"));
@@ -339,6 +402,7 @@ impl Component for Window {
             .focus_on_click(false)
             .build();
         header.pack_end(&primary_menu_button);
+        add_theme_controls(&window, &primary_menu_button, app.settings());
 
         let find_bar = FindBar::builder()
             .launch(())
