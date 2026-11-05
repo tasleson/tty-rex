@@ -299,6 +299,14 @@ pub fn find_page(child: &impl IsA<gtk::Widget>) -> Option<(adw::TabView, adw::Ta
     Some((tab_view, page))
 }
 
+/// Redraws the tab overview's thumbnail after the colors changed
+/// (`ptyxis_tab_invalidate_thumbnail()`).
+fn invalidate_thumbnail(root: &gtk::Box) {
+    if let Some((_, page)) = find_page(root) {
+        page.invalidate_thumbnail();
+    }
+}
+
 /// Everything needed to create a tab.
 pub struct TabInit {
     pub profile: Profile,
@@ -748,10 +756,12 @@ impl Component for Tab {
                 terminal::apply_profile(&self.terminal, &self.profile);
                 terminal::apply_profile_palette(&self.terminal, &self.profile);
                 self.update_dressing();
+                invalidate_thumbnail(root);
             }
             TabInput::AppearanceChanged => {
                 terminal::apply_profile_palette(&self.terminal, &self.profile);
                 self.update_dressing();
+                invalidate_thumbnail(root);
             }
             TabInput::Bell => {
                 if let Some((tab_view, page)) = find_page(root)

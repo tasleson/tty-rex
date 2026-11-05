@@ -48,6 +48,8 @@ const BACKDROP_FOREGROUND_MIX: f32 = 0.025;
 const BACKDROP_BACKGROUND_MIX: f32 = 0.99;
 /// Share of the background in the palette-derived accent color.
 const ACCENT_BACKGROUND_MIX: f32 = 0.15;
+/// Backdrop of thumbnail close buttons per state (`ptyxis-window-dressing.c`).
+const CLOSE_BUTTON_ALPHAS: [(&str, f64); 3] = [("", 0.15), (":hover", 0.25), (":active", 0.55)];
 /// Palette color the accent derives from (blue).
 const ACCENT_BASE_INDEX: usize = 4;
 
@@ -81,13 +83,17 @@ fn rule(css: &mut String, selector: &str, color: &gdk::RGBA, background: &gdk::R
 
 /// The window CSS for the window carrying `css_class`, following
 /// `ptyxis_window_dressing_update()`. Selectors are adapted to the port's
-/// widget tree; rules for widgets the port does not have yet (tab overview,
-/// size and hover-URI labels) are left out.
+/// widget tree; rules for widgets the port does not have yet (size and
+/// hover-URI labels) are left out.
 pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
     let face = style.face;
     let window = format!("window.{css_class}");
     let contents = format!("{window} toolbarview.{WINDOW_CONTENTS_CLASS}");
     let top_bar = format!("{contents} > revealer.top-bar > windowhandle");
+    // Everything but dialogs sits in the tab overview (the C build's
+    // `.window-contents`); `toolbarview.overview` is its own grid view.
+    let overview = format!("{window} taboverview");
+    let grid = format!("{overview} toolbarview.overview");
     let popover_alpha = style.opacity.max(MIN_POPOVER_OPACITY);
     let popover_background = with_alpha(&face.titlebar_background, popover_alpha);
     let mut css = String::new();
@@ -108,13 +114,13 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
     );
     rule(
         &mut css,
-        &format!("{contents} popover > contents"),
+        &format!("{overview} popover > contents"),
         &face.titlebar_foreground,
         &popover_background,
     );
     let _ = writeln!(
         css,
-        "{contents} popover > arrow {{ background-color: {popover_background}; }}"
+        "{overview} popover > arrow {{ background-color: {popover_background}; }}"
     );
     rule(
         &mut css,
@@ -128,6 +134,36 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
         &face.titlebar_foreground,
         &face.titlebar_background,
     );
+
+    // Thumbnails show terminals that leave their background to the
+    // window, so the cards provide it. As in C, they use the selected
+    // tab's palette rather than each tab's own.
+    rule(
+        &mut css,
+        &format!("{grid} overlay.card"),
+        &face.foreground,
+        &face.background,
+    );
+    let _ = writeln!(
+        css,
+        "{grid} tabthumbnail .icon-title-box {{ color: {}; }}",
+        face.foreground
+    );
+    rule(
+        &mut css,
+        &grid,
+        &face.titlebar_foreground,
+        &face.titlebar_background,
+    );
+    let close_button = format!("{overview} tabthumbnail .tab-close-button");
+    for (state, alpha) in CLOSE_BUTTON_ALPHAS {
+        rule(
+            &mut css,
+            &format!("{close_button}{state} image"),
+            &face.foreground,
+            &with_alpha(&face.foreground, alpha),
+        );
+    }
 
     let leader: Option<&Scarf> = match style.leader {
         _ if !style.visual_process_leader => None,
@@ -299,6 +335,43 @@ mod tests {
     }
 
     #[test]
+    fn tab_overview() {
+        let face = face();
+        let css = dressing_css(CLASS, &style(&face));
+        let grid = "window.ptyxis-tab-1 taboverview toolbarview.overview";
+        let close = "window.ptyxis-tab-1 taboverview tabthumbnail .tab-close-button";
+        for expected in [
+            rule_for(
+                &format!("{grid} overlay.card"),
+                &face.foreground,
+                &face.background,
+            ),
+            format!(
+                "{grid} tabthumbnail .icon-title-box {{ color: {}; }}\n",
+                face.foreground
+            ),
+            rule_for(grid, &face.titlebar_foreground, &face.titlebar_background),
+            rule_for(
+                &format!("{close} image"),
+                &face.foreground,
+                &with_alpha(&face.foreground, 0.15),
+            ),
+            rule_for(
+                &format!("{close}:hover image"),
+                &face.foreground,
+                &with_alpha(&face.foreground, 0.25),
+            ),
+            rule_for(
+                &format!("{close}:active image"),
+                &face.foreground,
+                &with_alpha(&face.foreground, 0.55),
+            ),
+        ] {
+            assert!(css.contains(&expected), "missing {expected:?} in\n{css}");
+        }
+    }
+
+    #[test]
     fn visual_bell_flash() {
         let face = face();
         for (dark, name) in [
@@ -346,7 +419,7 @@ mod tests {
                 &with_alpha(&face.background, opacity),
             );
             let popover = rule_for(
-                "window.ptyxis-tab-1 toolbarview.window-contents popover > contents",
+                "window.ptyxis-tab-1 taboverview popover > contents",
                 &face.titlebar_foreground,
                 &with_alpha(&face.titlebar_background, popover),
             );

@@ -47,6 +47,7 @@ pub mod key {
     pub const SHOW_KEYBOARD_SHORTCUTS: &str = "show-keyboard-shortcuts";
     pub const SEARCH: &str = "search";
     pub const SET_TITLE: &str = "set-title";
+    pub const TAB_OVERVIEW: &str = "tab-overview";
     pub const ZOOM_IN: &str = "zoom-in";
     pub const ZOOM_ONE: &str = "zoom-one";
     pub const ZOOM_OUT: &str = "zoom-out";
@@ -69,6 +70,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     (key::SHOW_KEYBOARD_SHORTCUTS, "win.show-keyboard-shortcuts"),
     (key::SEARCH, "win.search"),
     (key::SET_TITLE, "win.set-title"),
+    (key::TAB_OVERVIEW, "win.tab-overview"),
     (key::ZOOM_IN, "win.zoom-in"),
     (key::ZOOM_ONE, "win.zoom-one"),
     (key::ZOOM_OUT, "win.zoom-out"),
@@ -390,7 +392,7 @@ mod tests {
         CloseOtherTabsAction, CloseTabAction, CopyAction, DetachTabAction, MoveTabLeftAction,
         MoveTabRightAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
         PreferencesAction, PreviousTabAction, SearchAction, SetTitleAction,
-        ShowKeyboardShortcutsAction, ZoomInAction, ZoomOneAction, ZoomOutAction,
+        ShowKeyboardShortcutsAction, TabOverviewAction, ZoomInAction, ZoomOneAction, ZoomOutAction,
     };
     use relm4::actions::ActionName;
 
@@ -425,6 +427,7 @@ mod tests {
             ),
             (key::SEARCH, SearchAction::action_name()),
             (key::SET_TITLE, SetTitleAction::action_name()),
+            (key::TAB_OVERVIEW, TabOverviewAction::action_name()),
             (key::ZOOM_IN, ZoomInAction::action_name()),
             (key::ZOOM_ONE, ZoomOneAction::action_name()),
             (key::ZOOM_OUT, ZoomOutAction::action_name()),

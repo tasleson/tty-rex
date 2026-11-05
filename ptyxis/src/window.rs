@@ -55,6 +55,11 @@ pub const VISUAL_BELL_CLASS: &str = "visual-bell";
 /// build's 500 ms, synced with the 0.3 s animation).
 const VISUAL_BELL_DURATION: std::time::Duration = std::time::Duration::from_millis(500);
 const HAS_TAB_BAR_CLASS: &str = "has-tab-bar";
+/// How long libadwaita animates closing the tab overview; focus moves to
+/// the selected tab again afterwards (`ptyxis_window_tab_overview_notify_open_cb()`).
+const OVERVIEW_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(425);
+const OVERVIEW_CLOSE_DELAY_NO_ANIMATIONS: std::time::Duration =
+    std::time::Duration::from_millis(10);
 const MIN_WIDTH: i32 = 360;
 const MIN_HEIGHT: i32 = 294;
 
@@ -87,6 +92,7 @@ relm4::new_stateless_action!(pub ZoomOutAction, WindowActions, "zoom-out");
 relm4::new_stateless_action!(pub ZoomOneAction, WindowActions, "zoom-one");
 relm4::new_stateless_action!(pub SearchAction, WindowActions, "search");
 relm4::new_stateless_action!(pub SetTitleAction, WindowActions, "set-title");
+relm4::new_stateless_action!(pub TabOverviewAction, WindowActions, "tab-overview");
 relm4::new_stateless_action!(pub PreferencesAction, WindowActions, "preferences");
 relm4::new_stateless_action!(
     pub ShowKeyboardShortcutsAction,
@@ -131,6 +137,10 @@ pub enum WindowInput {
     Bell,
     /// The flash started with this serial is over.
     VisualBellDone(u32),
+    ToggleOverview,
+    OverviewClosed,
+    /// The overview's close animation started with this serial is over.
+    OverviewCloseFinished(u32),
     PageDetached {
         child: gtk::Widget,
         transferring: bool,
@@ -163,6 +173,10 @@ pub struct Window {
     /// Identifies the latest flash, so an earlier flash ending does not cut
     /// a later one short.
     visual_bell_serial: u32,
+    tab_overview: adw::TabOverview,
+    /// Identifies the latest overview close, so reopening the overview
+    /// before a close finishes cancels its delayed refocus.
+    overview_close_serial: u32,
 }
 
 /// Registers a parameterless action that forwards `message` to the window
@@ -207,51 +221,38 @@ impl Window {
         }
     }
 
-    /// A request for a new tab carrying over state from the active tab, as
-    /// `ptyxis_window_apply_current_settings()` does.
     fn inherited_request(&self, profile_uuid: Option<String>) -> TabRequest {
-        let mut request = TabRequest {
-            profile_uuid,
-            ..Default::default()
+        inherited_request(&self.app, &self.tab_view, profile_uuid)
+    }
+
+    fn add_tab(&mut self, request: TabRequest) {
+        if let Err(e) = insert_tab(&self.app, &self.tab_view, request) {
+            glib::g_critical!("Ptyxis", "Failed to create tab: {e}");
+            if self.tab_view.n_pages() == 0 {
+                self.window.destroy();
+            }
+        }
+    }
+
+    /// Moves focus back to the selected tab once the overview has closed,
+    /// working around <https://gitlab.gnome.org/GNOME/libadwaita/-/issues/670>
+    /// like `ptyxis_window_tab_overview_notify_open_cb()`.
+    fn overview_closed(&mut self) {
+        self.send_to_active_tab(crate::tab::TabInput::Focus);
+        let animations = gtk::Settings::default()
+            .map(|settings| settings.is_gtk_enable_animations())
+            .unwrap_or(true);
+        let delay = if animations {
+            OVERVIEW_CLOSE_DELAY
+        } else {
+            OVERVIEW_CLOSE_DELAY_NO_ANIMATIONS
         };
-        if let Some(active) = self.selected_child().and_then(|c| self.app.tab(&c)) {
-            request.profile_uuid = request.profile_uuid.or(Some(active.profile_uuid));
-            request.previous_cwd_uri = terminal::current_directory_uri(&active.terminal);
-            request.zoom = active.zoom.get();
-            request.grid_size = u32::try_from(active.terminal.column_count())
-                .ok()
-                .zip(u32::try_from(active.terminal.row_count()).ok());
-        }
-        request
-    }
-
-    fn insert_position(&self) -> i32 {
-        let n_pages = self.tab_view.n_pages();
-        match (
-            self.app.settings().new_tab_position(),
-            self.tab_view.selected_page(),
-        ) {
-            (NewTabPosition::Next, Some(page)) => self.tab_view.page_position(&page) + 1,
-            _ => n_pages,
-        }
-    }
-
-    fn add_tab(&mut self, mut request: TabRequest) {
-        if request.grid_size.is_none() && self.tab_view.n_pages() == 0 {
-            request.grid_size = Some(self.app.settings().initial_grid_size());
-        }
-        match self.app.create_tab(request) {
-            Ok(child) => {
-                let page = self.tab_view.insert(&child, self.insert_position());
-                self.tab_view.set_selected_page(&page);
-            }
-            Err(e) => {
-                glib::g_critical!("Ptyxis", "Failed to create tab: {e}");
-                if self.tab_view.n_pages() == 0 {
-                    self.window.destroy();
-                }
-            }
-        }
+        self.overview_close_serial = self.overview_close_serial.wrapping_add(1);
+        let serial = self.overview_close_serial;
+        let input = self.input.clone();
+        glib::timeout_add_local_once(delay, move || {
+            input.emit(WindowInput::OverviewCloseFinished(serial))
+        });
     }
 
     /// Flashes the header bar (`ptyxis_window_visual_bell()`).
@@ -332,6 +333,49 @@ impl Window {
         self.terminal_handlers = Some((tab.terminal.clone(), vec![cwd_id, selection_id, bell_id]));
         tab.sender.emit(crate::tab::TabInput::Focus);
     }
+}
+
+/// A request for a new tab in `tab_view` carrying over state from its
+/// selected tab, as `ptyxis_window_apply_current_settings()` does; `None`
+/// keeps the selected tab's profile.
+fn inherited_request(
+    app: &App,
+    tab_view: &adw::TabView,
+    profile_uuid: Option<String>,
+) -> TabRequest {
+    let mut request = TabRequest {
+        profile_uuid,
+        ..Default::default()
+    };
+    if let Some(active) = tab_view.selected_page().and_then(|p| app.tab(&p.child())) {
+        request.profile_uuid = request.profile_uuid.or(Some(active.profile_uuid));
+        request.previous_cwd_uri = terminal::current_directory_uri(&active.terminal);
+        request.zoom = active.zoom.get();
+        request.grid_size = u32::try_from(active.terminal.column_count())
+            .ok()
+            .zip(u32::try_from(active.terminal.row_count()).ok());
+    }
+    request
+}
+
+/// Creates a tab for `request` and selects it in `tab_view`. Free of the
+/// window model so the tab overview's synchronous `create-tab` can use it.
+fn insert_tab(
+    app: &App,
+    tab_view: &adw::TabView,
+    mut request: TabRequest,
+) -> Result<adw::TabPage, crate::settings::SettingsError> {
+    if request.grid_size.is_none() && tab_view.n_pages() == 0 {
+        request.grid_size = Some(app.settings().initial_grid_size());
+    }
+    let child = app.create_tab(request)?;
+    let position = match (app.settings().new_tab_position(), tab_view.selected_page()) {
+        (NewTabPosition::Next, Some(page)) => tab_view.page_position(&page) + 1,
+        _ => tab_view.n_pages(),
+    };
+    let page = tab_view.insert(&child, position);
+    tab_view.set_selected_page(&page);
+    Ok(page)
 }
 
 /// Adds `win.interface-style` and the theme selector to the primary menu
@@ -554,6 +598,12 @@ impl Component for Window {
             .focus_on_click(false)
             .build();
         header.pack_end(&primary_menu_button);
+        let tab_overview_button = gtk::ToggleButton::builder()
+            .icon_name("view-grid-symbolic")
+            .tooltip_text("Show Open Tabs")
+            .focus_on_click(false)
+            .build();
+        header.pack_end(&tab_overview_button);
         add_theme_controls(&window, &primary_menu_button, app.settings());
 
         let find_bar = FindBar::builder()
@@ -580,7 +630,43 @@ impl Component for Window {
         toolbar_view.add_top_bar(&visual_bell);
         toolbar_view.add_top_bar(&tab_bar);
         toolbar_view.set_content(Some(&content));
-        window.set_content(Some(&toolbar_view));
+        let tab_overview = adw::TabOverview::builder()
+            .view(&tab_view)
+            .child(&toolbar_view)
+            .enable_new_tab(true)
+            .build();
+        tab_overview
+            .bind_property("open", &tab_overview_button, "active")
+            .bidirectional()
+            .sync_create()
+            .build();
+        let input = sender.input_sender().clone();
+        tab_overview.connect_open_notify(move |overview| {
+            if !overview.is_open() {
+                input.emit(WindowInput::OverviewClosed);
+            }
+        });
+        // The overview needs the page right away, so the tab is created
+        // here rather than through a message (`win.new-tab` semantics).
+        let weak_app = Rc::downgrade(&app);
+        let weak_tab_view = tab_view.downgrade();
+        tab_overview.connect_create_tab(move |_| {
+            let tab_view = weak_tab_view
+                .upgrade()
+                .expect("the tab overview outlives its tab view");
+            if let Some(app) = weak_app.upgrade() {
+                let request = inherited_request(&app, &tab_view, None);
+                match insert_tab(&app, &tab_view, request) {
+                    Ok(page) => return page,
+                    Err(e) => glib::g_critical!("Ptyxis", "Failed to create tab: {e}"),
+                }
+            }
+            // The overview is only open while the window has tabs.
+            tab_view
+                .selected_page()
+                .expect("an open tab overview has a selected tab")
+        });
+        window.set_content(Some(&tab_overview));
 
         let title_bindings = glib::BindingGroup::new();
         title_bindings
@@ -623,6 +709,7 @@ impl Component for Window {
         add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset);
         add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
         add_action::<SetTitleAction>(&window, &sender, || WindowInput::SetTitle);
+        add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
         add_action::<PreferencesAction>(&window, &sender, || WindowInput::ShowPreferences);
         add_action::<ShowKeyboardShortcutsAction>(&window, &sender, || {
             WindowInput::ShowKeyboardShortcuts
@@ -695,6 +782,8 @@ impl Component for Window {
             input: sender.input_sender().clone(),
             visual_bell,
             visual_bell_serial: 0,
+            tab_overview,
+            overview_close_serial: 0,
         };
         ComponentParts { model, widgets: () }
     }
@@ -769,6 +858,15 @@ impl Component for Window {
             }
             WindowInput::SelectedPageChanged => self.on_selected_page_changed(),
             WindowInput::Bell => self.visual_bell(),
+            WindowInput::ToggleOverview => {
+                self.tab_overview.set_open(!self.tab_overview.is_open());
+            }
+            WindowInput::OverviewClosed => self.overview_closed(),
+            WindowInput::OverviewCloseFinished(serial) => {
+                if serial == self.overview_close_serial && !self.tab_overview.is_open() {
+                    self.send_to_active_tab(TabInput::Focus);
+                }
+            }
             WindowInput::VisualBellDone(serial) => {
                 if serial == self.visual_bell_serial {
                     self.visual_bell.remove_css_class(VISUAL_BELL_CLASS);
