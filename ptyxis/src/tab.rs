@@ -29,10 +29,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 use relm4::prelude::*;
 use vte::prelude::*;
 
+use crate::inspector::{Inspector, InspectorInit};
 use crate::profile::Profile;
 use crate::settings::{self, AppSettings, ExitAction};
 use crate::spawn::{ChildExit, SpawnError, SpawnRequest, Spawner};
@@ -135,6 +136,49 @@ pub fn compose_title(
     title
 }
 
+/// The terminal context menu: the items of `src/ptyxis-terminal.ui` whose
+/// actions the port implements.
+fn context_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    let section = gio::Menu::new();
+    section.append(Some("Search…"), Some("win.search"));
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    section.append(Some("_Copy"), Some("win.copy-clipboard"));
+    section.append(Some("_Paste"), Some("win.paste-clipboard"));
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    for (label, select) in [("Select _All", true), ("Select _None", false)] {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(Some("terminal.select-all"), Some(&select.to_variant()));
+        section.append_item(&item);
+    }
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    section.append(Some("_Inspect Terminal"), Some("tab.inspect"));
+    menu.append_section(None, &section);
+    menu
+}
+
+/// `terminal.select-all(b)`: select everything, or nothing when false.
+fn install_terminal_actions(terminal: &vte::Terminal) {
+    let select_all = gio::SimpleAction::new("select-all", Some(glib::VariantTy::BOOLEAN));
+    let weak = terminal.downgrade();
+    select_all.connect_activate(move |_, select| {
+        let Some(terminal) = weak.upgrade() else {
+            return;
+        };
+        if select.and_then(|v| v.get::<bool>()).unwrap_or(true) {
+            terminal.select_all();
+        } else {
+            terminal.unselect_all();
+        }
+    });
+    let actions = gio::SimpleActionGroup::new();
+    actions.add_action(&select_all);
+    terminal.insert_action_group("terminal", Some(&actions));
+}
+
 /// Finds the tab view and page currently hosting `child`.
 pub fn find_page(child: &impl IsA<gtk::Widget>) -> Option<(adw::TabView, adw::TabPage)> {
     let tab_view = child
@@ -181,6 +225,8 @@ pub enum TabInput {
     Copy,
     Paste,
     Focus,
+    Inspect,
+    InspectorClosed,
 }
 
 pub struct Tab {
@@ -200,6 +246,7 @@ pub struct Tab {
     banner_action: BannerAction,
     /// Handlers on objects shared with other tabs, disconnected on shutdown.
     shared_handlers: Vec<(glib::Object, glib::SignalHandlerId)>,
+    inspector: Option<Controller<Inspector>>,
 }
 
 impl Tab {
@@ -343,6 +390,15 @@ impl Component for Tab {
         let pressed = Rc::clone(&has_pressed_key);
         terminal.connect_commit(move |_, _, _| pressed.set(true));
 
+        terminal.set_context_menu_model(Some(&context_menu()));
+        install_terminal_actions(&terminal);
+        let input = sender.input_sender().clone();
+        let inspect = gio::SimpleAction::new("inspect", None);
+        inspect.connect_activate(move |_, _| input.emit(TabInput::Inspect));
+        let tab_actions = gio::SimpleActionGroup::new();
+        tab_actions.add_action(&inspect);
+        root.insert_action_group("tab", Some(&tab_actions));
+
         // The page only exists once the window has inserted us.
         let input = sender.input_sender().clone();
         root.connect_parent_notify(move |_| input.emit(TabInput::UpdateTitle));
@@ -396,6 +452,7 @@ impl Component for Tab {
             terminal,
             banner,
             banner_action: BannerAction::Restart,
+            inspector: None,
             shared_handlers,
         };
         model.respawn(&sender);
@@ -454,6 +511,30 @@ impl Component for Tab {
             TabInput::ZoomReset => self.set_zoom(ZoomLevel::DEFAULT),
             TabInput::Copy => self.terminal.copy_clipboard_format(vte::Format::Text),
             TabInput::Paste => self.terminal.paste_clipboard(),
+            TabInput::Inspect => {
+                // One inspector per tab: a second request raises it.
+                if let Some(inspector) = &self.inspector {
+                    inspector.widget().present();
+                    return;
+                }
+                let inspector = Inspector::builder()
+                    .launch(InspectorInit {
+                        terminal: self.terminal.clone(),
+                        profile: self.profile.clone(),
+                        zoom: Rc::clone(&self.zoom),
+                    })
+                    .detach();
+                let window = inspector.widget();
+                window.set_transient_for(root.root().and_downcast_ref::<gtk::Window>());
+                let input = sender.input_sender().clone();
+                window.connect_close_request(move |_| {
+                    input.emit(TabInput::InspectorClosed);
+                    glib::Propagation::Proceed
+                });
+                window.present();
+                self.inspector = Some(inspector);
+            }
+            TabInput::InspectorClosed => self.inspector = None,
             TabInput::Focus => {
                 self.terminal.grab_focus();
             }
@@ -463,6 +544,10 @@ impl Component for Tab {
     }
 
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
+        // The inspector describes this terminal, so it goes with the tab.
+        if let Some(inspector) = self.inspector.take() {
+            inspector.widget().destroy();
+        }
         for (object, id) in self.shared_handlers.drain(..) {
             object.disconnect(id);
         }

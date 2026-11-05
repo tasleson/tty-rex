@@ -47,6 +47,15 @@ impl ZoomLevel {
         Self((self.0 + 1).min(Self::MAX.0))
     }
 
+    /// Percentage shown for the zoom (`ptyxis_tab_dup_zoom_label()`).
+    pub fn label(self) -> String {
+        if self == Self::DEFAULT {
+            "100%".to_owned()
+        } else {
+            format!("{:.0}%", self.font_scale() * 100.0)
+        }
+    }
+
     pub fn zoom_out(self) -> Self {
         Self((self.0 - 1).max(Self::MIN.0))
     }
@@ -57,6 +66,7 @@ pub fn create() -> vte::Terminal {
     let terminal = vte::Terminal::new();
     terminal.set_enable_fallback_scrolling(false);
     terminal.set_scroll_unit_is_pixels(true);
+    terminal.set_allow_hyperlink(true);
     terminal.set_hexpand(true);
     terminal.set_vexpand(true);
     terminal
@@ -146,6 +156,23 @@ pub fn current_directory_uri(terminal: &vte::Terminal) -> Option<String> {
         .filter(|uri| !uri.is_empty())
 }
 
+/// Current file URI reported via OSC 6.
+pub fn current_file_uri(terminal: &vte::Terminal) -> Option<String> {
+    #[allow(deprecated)]
+    terminal
+        .current_file_uri()
+        .map(|uri| uri.to_string())
+        .filter(|uri| !uri.is_empty())
+}
+
+pub fn connect_current_file_uri_changed(
+    terminal: &vte::Terminal,
+    f: impl Fn(&vte::Terminal) + 'static,
+) -> glib::SignalHandlerId {
+    #[allow(deprecated)]
+    terminal.connect_current_file_uri_changed(f)
+}
+
 pub fn connect_current_directory_uri_changed(
     terminal: &vte::Terminal,
     f: impl Fn(&vte::Terminal) + 'static,
@@ -192,6 +219,19 @@ mod tests {
                 "{level:?}: {} != {expected}",
                 level.font_scale()
             );
+        }
+    }
+
+    #[test]
+    fn zoom_labels() {
+        let cases = [
+            (ZoomLevel::DEFAULT, "100%"),
+            (ZoomLevel(2), "120%"),
+            (ZoomLevel(1), "110%"),
+            (ZoomLevel(-2), "83%"),
+        ];
+        for (level, expected) in cases {
+            assert_eq!(level.label(), expected, "{level:?}");
         }
     }
 
