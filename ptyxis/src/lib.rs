@@ -40,6 +40,7 @@ pub mod cli;
 pub mod config;
 pub mod find_bar;
 pub mod inspector;
+pub mod leader;
 pub mod palette;
 pub mod palette_preview;
 pub mod preferences;
