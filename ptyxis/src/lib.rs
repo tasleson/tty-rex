@@ -35,4 +35,6 @@
 //! `org.gnome.Ptyxis.Devel` to avoid talking to an installed instance.
 
 pub mod config;
+pub mod palette;
+pub mod profile;
 pub mod settings;

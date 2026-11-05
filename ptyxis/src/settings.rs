@@ -17,16 +17,61 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! GSettings access.
+//! GSettings access for the `org.gnome.Ptyxis` schema.
 //!
 //! `gio::Settings::new()` aborts the process if a schema is missing, so all
 //! settings objects are created through [`open`], which resolves the schema
 //! explicitly and reports an actionable error instead.
+//!
+//! Note that font, cursor and bell options are application-wide keys in the
+//! schema (see `src/ptyxis-settings.c`), not per-profile ones.
 
-use gtk::gio;
-use gtk::glib;
+use gtk::prelude::*;
+use gtk::{gio, glib, pango};
 
 use crate::config;
+
+/// Keys of the `org.gnome.Ptyxis` schema used by the port.
+pub mod key {
+    pub const AUDIBLE_BELL: &str = "audible-bell";
+    pub const CURSOR_BLINK_MODE: &str = "cursor-blink-mode";
+    pub const CURSOR_SHAPE: &str = "cursor-shape";
+    pub const DEFAULT_COLUMNS: &str = "default-columns";
+    pub const DEFAULT_PROFILE_UUID: &str = "default-profile-uuid";
+    pub const DEFAULT_ROWS: &str = "default-rows";
+    pub const FONT_NAME: &str = "font-name";
+    pub const INTERFACE_STYLE: &str = "interface-style";
+    pub const NEW_TAB_POSITION: &str = "new-tab-position";
+    pub const PROFILE_UUIDS: &str = "profile-uuids";
+    pub const RESTORE_WINDOW_SIZE: &str = "restore-window-size";
+    pub const TEXT_BLINK_MODE: &str = "text-blink-mode";
+    pub const USE_SYSTEM_FONT: &str = "use-system-font";
+    pub const WINDOW_SIZE: &str = "window-size";
+
+    /// All keys, for validation against the schema template.
+    pub const ALL: &[&str] = &[
+        AUDIBLE_BELL,
+        CURSOR_BLINK_MODE,
+        CURSOR_SHAPE,
+        DEFAULT_COLUMNS,
+        DEFAULT_PROFILE_UUID,
+        DEFAULT_ROWS,
+        FONT_NAME,
+        INTERFACE_STYLE,
+        NEW_TAB_POSITION,
+        PROFILE_UUIDS,
+        RESTORE_WINDOW_SIZE,
+        TEXT_BLINK_MODE,
+        USE_SYSTEM_FONT,
+        WINDOW_SIZE,
+    ];
+}
+
+/// Schema and key providing the desktop monospace font.
+const DESKTOP_INTERFACE_SCHEMA_ID: &str = "org.gnome.desktop.interface";
+const DESKTOP_MONOSPACE_FONT_KEY: &str = "monospace-font-name";
+/// Same fallback as `ptyxis_application_init()`.
+const FALLBACK_SYSTEM_FONT: &str = "Monospace 11";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
@@ -69,6 +114,292 @@ fn create_schema_source() -> Option<gio::SettingsSchemaSource> {
     }
 }
 
+/// Defines an enum mirroring a schema `<enum>` with nick conversions.
+///
+/// Unknown nicks map to the declared default, which matches the schema
+/// default, so a corrupted value never prevents a terminal from opening.
+macro_rules! nick_enum {
+    (
+        $(#[$meta:meta])*
+        $name:ident: $schema_enum:literal, default $default:ident {
+            $($variant:ident => $nick:literal),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            /// Name of the enum in the schema, without the schema id prefix.
+            pub const SCHEMA_ENUM: &'static str = $schema_enum;
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub fn from_nick(nick: &str) -> Option<Self> {
+                match nick {
+                    $($nick => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            pub fn from_nick_or_default(nick: &str) -> Self {
+                Self::from_nick(nick).unwrap_or(Self::$default)
+            }
+
+            pub fn nick(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $nick),+
+                }
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::$default
+            }
+        }
+    };
+}
+
+nick_enum! {
+    CursorShape: "CursorShape", default Block {
+        Block => "block",
+        Ibeam => "ibeam",
+        Underline => "underline",
+    }
+}
+
+impl From<CursorShape> for vte::CursorShape {
+    fn from(value: CursorShape) -> Self {
+        match value {
+            CursorShape::Block => vte::CursorShape::Block,
+            CursorShape::Ibeam => vte::CursorShape::Ibeam,
+            CursorShape::Underline => vte::CursorShape::Underline,
+        }
+    }
+}
+
+nick_enum! {
+    CursorBlinkMode: "CursorBlinkMode", default System {
+        System => "system",
+        On => "on",
+        Off => "off",
+    }
+}
+
+impl From<CursorBlinkMode> for vte::CursorBlinkMode {
+    fn from(value: CursorBlinkMode) -> Self {
+        match value {
+            CursorBlinkMode::System => vte::CursorBlinkMode::System,
+            CursorBlinkMode::On => vte::CursorBlinkMode::On,
+            CursorBlinkMode::Off => vte::CursorBlinkMode::Off,
+        }
+    }
+}
+
+nick_enum! {
+    TextBlinkMode: "TextBlinkMode", default Always {
+        Never => "never",
+        Focused => "focused",
+        Unfocused => "unfocused",
+        Always => "always",
+    }
+}
+
+impl From<TextBlinkMode> for vte::TextBlinkMode {
+    fn from(value: TextBlinkMode) -> Self {
+        match value {
+            TextBlinkMode::Never => vte::TextBlinkMode::Never,
+            TextBlinkMode::Focused => vte::TextBlinkMode::Focused,
+            TextBlinkMode::Unfocused => vte::TextBlinkMode::Unfocused,
+            TextBlinkMode::Always => vte::TextBlinkMode::Always,
+        }
+    }
+}
+
+nick_enum! {
+    /// What happens to a tab when its child process exits.
+    ExitAction: "ExitAction", default Close {
+        None => "none",
+        Restart => "restart",
+        Close => "close",
+    }
+}
+
+nick_enum! {
+    PreserveDirectory: "PreserveDirectory", default Safe {
+        Never => "never",
+        Safe => "safe",
+        Always => "always",
+    }
+}
+
+nick_enum! {
+    NewTabPosition: "NewTabPosition", default Last {
+        Last => "last",
+        Next => "next",
+    }
+}
+
+nick_enum! {
+    InterfaceStyle: "InterfaceStyle", default Dark {
+        System => "system",
+        Light => "light",
+        Dark => "dark",
+    }
+}
+
+impl From<InterfaceStyle> for adw::ColorScheme {
+    fn from(value: InterfaceStyle) -> Self {
+        match value {
+            InterfaceStyle::System => adw::ColorScheme::Default,
+            InterfaceStyle::Light => adw::ColorScheme::ForceLight,
+            InterfaceStyle::Dark => adw::ColorScheme::ForceDark,
+        }
+    }
+}
+
+/// Picks the font to use, following `ptyxis_settings_dup_font_desc()`: the
+/// system font wins when requested or when no custom font is configured.
+pub fn effective_font_name<'a>(
+    use_system_font: bool,
+    font_name: &'a str,
+    system_font: &'a str,
+) -> &'a str {
+    if use_system_font || font_name.trim().is_empty() {
+        system_font
+    } else {
+        font_name
+    }
+}
+
+/// Picks the initial terminal grid size, following
+/// `ptyxis_application_apply_default_size()`. A saved size of zero means
+/// nothing was saved yet.
+pub fn initial_grid_size(
+    restore_window_size: bool,
+    saved: (u32, u32),
+    default: (u32, u32),
+) -> (u32, u32) {
+    if restore_window_size && saved.0 > 0 && saved.1 > 0 {
+        saved
+    } else {
+        default
+    }
+}
+
+/// Typed accessors over the application-wide `org.gnome.Ptyxis` settings.
+#[derive(Debug, Clone)]
+pub struct AppSettings {
+    settings: gio::Settings,
+    desktop: Option<gio::Settings>,
+}
+
+impl AppSettings {
+    pub fn new() -> Result<Self, SettingsError> {
+        let settings = open(config::SCHEMA_ID, None)?;
+        // The desktop schema is optional (e.g. non-GNOME sessions).
+        let desktop = gio::SettingsSchemaSource::default()
+            .and_then(|source| source.lookup(DESKTOP_INTERFACE_SCHEMA_ID, true))
+            .filter(|schema| schema.has_key(DESKTOP_MONOSPACE_FONT_KEY))
+            .map(|schema| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None));
+        Ok(Self { settings, desktop })
+    }
+
+    /// The underlying settings, for connecting change notifications.
+    pub fn gsettings(&self) -> &gio::Settings {
+        &self.settings
+    }
+
+    /// Desktop interface settings, if the schema is installed.
+    pub fn desktop_settings(&self) -> Option<&gio::Settings> {
+        self.desktop.as_ref()
+    }
+
+    fn enum_value<T>(&self, key: &str, parse: fn(&str) -> T) -> T {
+        parse(self.settings.string(key).as_str())
+    }
+
+    pub fn audible_bell(&self) -> bool {
+        self.settings.boolean(key::AUDIBLE_BELL)
+    }
+
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.enum_value(key::CURSOR_SHAPE, CursorShape::from_nick_or_default)
+    }
+
+    pub fn cursor_blink_mode(&self) -> CursorBlinkMode {
+        self.enum_value(
+            key::CURSOR_BLINK_MODE,
+            CursorBlinkMode::from_nick_or_default,
+        )
+    }
+
+    pub fn text_blink_mode(&self) -> TextBlinkMode {
+        self.enum_value(key::TEXT_BLINK_MODE, TextBlinkMode::from_nick_or_default)
+    }
+
+    pub fn new_tab_position(&self) -> NewTabPosition {
+        self.enum_value(key::NEW_TAB_POSITION, NewTabPosition::from_nick_or_default)
+    }
+
+    pub fn interface_style(&self) -> InterfaceStyle {
+        self.enum_value(key::INTERFACE_STYLE, InterfaceStyle::from_nick_or_default)
+    }
+
+    pub fn profile_uuids(&self) -> Vec<String> {
+        self.settings
+            .strv(key::PROFILE_UUIDS)
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    pub fn set_profile_uuids(&self, uuids: &[String]) -> Result<(), glib::BoolError> {
+        self.settings.set_strv(key::PROFILE_UUIDS, uuids)
+    }
+
+    pub fn default_profile_uuid(&self) -> String {
+        self.settings.string(key::DEFAULT_PROFILE_UUID).into()
+    }
+
+    pub fn set_default_profile_uuid(&self, uuid: &str) -> Result<(), glib::BoolError> {
+        self.settings.set_string(key::DEFAULT_PROFILE_UUID, uuid)
+    }
+
+    pub fn system_font_name(&self) -> String {
+        self.desktop
+            .as_ref()
+            .map(|s| s.string(DESKTOP_MONOSPACE_FONT_KEY).to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| FALLBACK_SYSTEM_FONT.to_owned())
+    }
+
+    pub fn font_desc(&self) -> pango::FontDescription {
+        let font_name = self.settings.string(key::FONT_NAME);
+        let system_font = self.system_font_name();
+        pango::FontDescription::from_string(effective_font_name(
+            self.settings.boolean(key::USE_SYSTEM_FONT),
+            &font_name,
+            &system_font,
+        ))
+    }
+
+    /// Initial terminal size in (columns, rows) for a new window.
+    pub fn initial_grid_size(&self) -> (u32, u32) {
+        let saved: (u32, u32) = self.settings.get(key::WINDOW_SIZE);
+        initial_grid_size(
+            self.settings.boolean(key::RESTORE_WINDOW_SIZE),
+            saved,
+            (
+                self.settings.uint(key::DEFAULT_COLUMNS),
+                self.settings.uint(key::DEFAULT_ROWS),
+            ),
+        )
+    }
+}
+
 /// Looks up a schema by id, searching parent sources too.
 pub fn lookup_schema(schema_id: &str) -> Option<gio::SettingsSchema> {
     schema_source()?.lookup(schema_id, true)
@@ -83,6 +414,37 @@ pub fn open(schema_id: &str, path: Option<&str>) -> Result<gio::Settings, Settin
         None::<&gio::SettingsBackend>,
         path,
     ))
+}
+
+/// Helpers for validating Rust constants against the schema template.
+#[cfg(test)]
+pub(crate) mod schema_template {
+    pub const TEMPLATE: &str = include_str!("../../../src/org.gnome.Ptyxis.gschema.xml.in");
+
+    /// Returns the XML body of the element starting with `open_tag`.
+    fn block(open_tag: &str, close_tag: &str) -> &'static str {
+        let start = TEMPLATE
+            .find(open_tag)
+            .unwrap_or_else(|| panic!("{open_tag} not found in schema template"));
+        let rest = &TEMPLATE[start..];
+        let end = rest.find(close_tag).expect("unterminated block");
+        &rest[..end]
+    }
+
+    pub fn schema_block(schema_id_placeholder: &str) -> &'static str {
+        block(
+            &format!("<schema id=\"{schema_id_placeholder}\""),
+            "</schema>",
+        )
+    }
+
+    pub fn enum_block(name: &str) -> &'static str {
+        block(&format!("<enum id=\"@APP_SCHEMA_ID@.{name}\""), "</enum>")
+    }
+
+    pub fn has_key(schema_id_placeholder: &str, key: &str) -> bool {
+        schema_block(schema_id_placeholder).contains(&format!("<key name=\"{key}\""))
+    }
 }
 
 #[cfg(test)]
@@ -102,6 +464,98 @@ mod tests {
             eprintln!("schema {schema_id} unavailable (no glib-compile-schemas); skipping");
         }
         schema
+    }
+
+    #[test]
+    fn app_keys_exist_in_schema() {
+        for key in key::ALL {
+            assert!(
+                schema_template::has_key("@APP_SCHEMA_ID@", key),
+                "{key} missing from schema"
+            );
+        }
+    }
+
+    fn assert_enum_matches_schema(schema_enum: &str, nicks: &[&str]) {
+        let block = schema_template::enum_block(schema_enum);
+        let schema_nicks = block.matches("nick=\"").count();
+        assert_eq!(schema_nicks, nicks.len(), "{schema_enum}: nick count");
+        for nick in nicks {
+            assert!(
+                block.contains(&format!("nick=\"{nick}\"")),
+                "{schema_enum}: {nick} not in schema"
+            );
+        }
+    }
+
+    macro_rules! check_enum {
+        ($ty:ty) => {{
+            let nicks: Vec<_> = <$ty>::ALL.iter().map(|v| v.nick()).collect();
+            assert_enum_matches_schema(<$ty>::SCHEMA_ENUM, &nicks);
+            for v in <$ty>::ALL {
+                assert_eq!(<$ty>::from_nick(v.nick()), Some(*v));
+            }
+            assert_eq!(<$ty>::from_nick("bogus"), None);
+            assert_eq!(<$ty>::from_nick_or_default("bogus"), <$ty>::default());
+        }};
+    }
+
+    #[test]
+    fn enums_match_schema() {
+        check_enum!(CursorShape);
+        check_enum!(CursorBlinkMode);
+        check_enum!(TextBlinkMode);
+        check_enum!(ExitAction);
+        check_enum!(PreserveDirectory);
+        check_enum!(NewTabPosition);
+        check_enum!(InterfaceStyle);
+    }
+
+    #[test]
+    fn enum_defaults_match_schema_defaults() {
+        let cases: &[(&str, &str)] = &[
+            (key::CURSOR_SHAPE, CursorShape::default().nick()),
+            (key::CURSOR_BLINK_MODE, CursorBlinkMode::default().nick()),
+            (key::TEXT_BLINK_MODE, TextBlinkMode::default().nick()),
+            (key::NEW_TAB_POSITION, NewTabPosition::default().nick()),
+            (key::INTERFACE_STYLE, InterfaceStyle::default().nick()),
+        ];
+        let block = schema_template::schema_block("@APP_SCHEMA_ID@");
+        for (key, nick) in cases {
+            let start = block.find(&format!("<key name=\"{key}\"")).unwrap();
+            let default = &block[start..];
+            let default = &default[default.find("<default>").unwrap()..];
+            assert!(
+                default.starts_with(&format!("<default>'{nick}'</default>")),
+                "{key} default should be {nick}"
+            );
+        }
+    }
+
+    #[test]
+    fn font_selection() {
+        let cases = [
+            (true, "Mono 12", "System 10", "System 10"),
+            (false, "Mono 12", "System 10", "Mono 12"),
+            (false, "", "System 10", "System 10"),
+            (false, "  ", "System 10", "System 10"),
+        ];
+        for (use_system, font, system, expected) in cases {
+            assert_eq!(effective_font_name(use_system, font, system), expected);
+        }
+    }
+
+    #[test]
+    fn grid_size_selection() {
+        let cases = [
+            (true, (120, 38), (80, 24), (120, 38)),
+            (true, (0, 0), (80, 24), (80, 24)),
+            (true, (120, 0), (80, 24), (80, 24)),
+            (false, (120, 38), (80, 24), (80, 24)),
+        ];
+        for (restore, saved, default, expected) in cases {
+            assert_eq!(initial_grid_size(restore, saved, default), expected);
+        }
     }
 
     #[test]

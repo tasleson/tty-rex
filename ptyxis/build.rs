@@ -24,6 +24,9 @@
 //! values, so existing user configuration under `/org/gnome/Ptyxis/` is
 //! read) and compiled with `glib-compile-schemas` so the binary can run
 //! uninstalled.
+//!
+//! The bundled palettes in `src/palettes/` are embedded into the binary
+//! (the C build does the same via GResource), keyed by file stem.
 
 use std::env;
 use std::fs;
@@ -33,6 +36,8 @@ use std::process::Command;
 const SCHEMA_ID: &str = "org.gnome.Ptyxis";
 const SCHEMA_PATH: &str = "/org/gnome/Ptyxis/";
 const SCHEMA_TEMPLATE: &str = "org.gnome.Ptyxis.gschema.xml.in";
+const PALETTES_DIR: &str = "palettes";
+const PALETTE_SUFFIX: &str = ".palette";
 
 fn c_source_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("set by cargo"));
@@ -94,10 +99,39 @@ fn generate_schema(src_dir: &Path, out_dir: &Path) {
     }
 }
 
+fn generate_palettes(src_dir: &Path, out_dir: &Path) {
+    let palettes_dir = src_dir.join(PALETTES_DIR);
+    println!("cargo::rerun-if-changed={}", palettes_dir.display());
+
+    let mut palettes: Vec<(String, PathBuf)> = fs::read_dir(&palettes_dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", palettes_dir.display()))
+        .filter_map(|entry| {
+            let path = entry.expect("readable palette directory entry").path();
+            let name = path.file_name()?.to_str()?;
+            let id = name.strip_suffix(PALETTE_SUFFIX)?.to_owned();
+            Some((id, path))
+        })
+        .collect();
+    palettes.sort();
+
+    let mut code = String::from("pub static BUILTIN_PALETTES: &[(&str, &str)] = &[\n");
+    for (id, path) in &palettes {
+        code.push_str(&format!(
+            "    ({id:?}, include_str!({:?})),\n",
+            path.display()
+        ));
+    }
+    code.push_str("];\n");
+
+    let dest = out_dir.join("builtin_palettes.rs");
+    fs::write(&dest, code).unwrap_or_else(|e| panic!("failed to write {}: {e}", dest.display()));
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("set by cargo"));
     let src_dir = c_source_dir();
 
     println!("cargo::rerun-if-changed=build.rs");
     generate_schema(&src_dir, &out_dir);
+    generate_palettes(&src_dir, &out_dir);
 }
