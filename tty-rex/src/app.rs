@@ -134,6 +134,22 @@ relm4::new_stateless_action!(NewWindowAction, AppActions, "new-window");
 relm4::new_stateless_action!(NewTabAction, AppActions, "new-tab");
 relm4::new_stateful_action!(EditProfileAction, AppActions, "edit-profile", String, ());
 
+/// tty-rex's icon, named after the default application id like the desktop
+/// file's `Icon=`, so builds with another id (e.g. `.Devel`) find it too.
+const ICON_NAME: &str = "io.github.tasleson.TtyRex";
+/// Icon used while tty-rex's own icon is not installed.
+const FALLBACK_ICON_NAME: &str = "org.gnome.Ptyxis";
+
+/// The window icon: tty-rex's own when the icon theme has it, otherwise
+/// Ptyxis's, which an installed Ptyxis provides.
+fn app_icon_name(has_icon: impl Fn(&str) -> bool) -> &'static str {
+    if has_icon(ICON_NAME) {
+        ICON_NAME
+    } else {
+        FALLBACK_ICON_NAME
+    }
+}
+
 impl App {
     fn new(application: &adw::Application) -> Result<Rc<Self>, SettingsError> {
         let settings = AppSettings::new()?;
@@ -497,7 +513,12 @@ pub fn run() -> glib::ExitCode {
         let state = Rc::clone(&state);
         let failed = Rc::clone(&failed);
         move |application| {
-            gtk::Window::set_default_icon_name(config::APP_ID);
+            let icon_theme = gtk::gdk::Display::default().map(|d| gtk::IconTheme::for_display(&d));
+            gtk::Window::set_default_icon_name(app_icon_name(|name| {
+                icon_theme
+                    .as_ref()
+                    .is_some_and(|theme| theme.has_icon(name))
+            }));
             relm4::set_global_css(STYLESHEET);
             match App::new(application) {
                 Ok(app) => *state.borrow_mut() = Some(app),
@@ -533,5 +554,28 @@ pub fn run() -> glib::ExitCode {
         glib::ExitCode::FAILURE
     } else {
         code
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_falls_back_to_ptyxis() {
+        let cases: [(&[&str], &str); 3] = [
+            (&[ICON_NAME, FALLBACK_ICON_NAME], ICON_NAME),
+            (&[FALLBACK_ICON_NAME], FALLBACK_ICON_NAME),
+            // Without either, still ask for Ptyxis's: GTK then shows its
+            // generic icon, as for any missing name.
+            (&[], FALLBACK_ICON_NAME),
+        ];
+        for (installed, expected) in cases {
+            assert_eq!(
+                app_icon_name(|name| installed.contains(&name)),
+                expected,
+                "{installed:?}"
+            );
+        }
     }
 }
