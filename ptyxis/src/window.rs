@@ -68,6 +68,11 @@ relm4::new_stateless_action!(pub ZoomOutAction, WindowActions, "zoom-out");
 relm4::new_stateless_action!(pub ZoomOneAction, WindowActions, "zoom-one");
 relm4::new_stateless_action!(pub SearchAction, WindowActions, "search");
 relm4::new_stateless_action!(pub PreferencesAction, WindowActions, "preferences");
+relm4::new_stateless_action!(
+    pub ShowKeyboardShortcutsAction,
+    WindowActions,
+    "show-keyboard-shortcuts"
+);
 
 pub struct WindowInit {
     pub app: Rc<App>,
@@ -94,6 +99,7 @@ pub enum WindowInput {
     ShowFind,
     FindDismissed,
     ShowPreferences,
+    ShowKeyboardShortcuts,
     SelectedPageChanged,
     PageDetached {
         child: gtk::Widget,
@@ -268,6 +274,9 @@ fn build_primary_menu() -> gio::Menu {
     section.append_item(&RelmAction::<PreferencesAction>::to_menu_item(
         "_Preferences",
     ));
+    section.append_item(&RelmAction::<ShowKeyboardShortcutsAction>::to_menu_item(
+        "_Keyboard Shortcuts",
+    ));
     menu.append_section(None, &section);
     menu
 }
@@ -386,6 +395,9 @@ impl Component for Window {
         add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset);
         add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
         add_action::<PreferencesAction>(&window, &sender, || WindowInput::ShowPreferences);
+        add_action::<ShowKeyboardShortcutsAction>(&window, &sender, || {
+            WindowInput::ShowKeyboardShortcuts
+        });
 
         let shortcuts = Shortcuts::new()
             .inspect(|shortcuts| window.add_controller(shortcuts.controller().clone()))
@@ -480,6 +492,9 @@ impl Component for Window {
             }
             WindowInput::ShowPreferences => {
                 self.app.show_preferences(Some(self.window.upcast_ref()));
+            }
+            WindowInput::ShowKeyboardShortcuts => {
+                self.app.show_shortcuts(Some(self.window.upcast_ref()));
             }
             WindowInput::FindDismissed => {
                 self.find_bar_revealer.set_reveal_child(false);

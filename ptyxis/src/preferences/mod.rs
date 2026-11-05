@@ -26,6 +26,7 @@
 //! it when another profile is made the default.
 #![allow(deprecated)] // AdwPreferencesWindow and its subpage/toast API.
 
+mod accel_dialog;
 mod custom_links;
 mod profile_editor;
 mod widgets;
@@ -34,6 +35,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use relm4::prelude::*;
 
+use self::accel_dialog::{AccelDialog, AccelDialogInit};
 use self::custom_links::CustomLinksGroup;
 use self::profile_editor::{ProfileEditor, ProfileEditorInit, ProfileEditorInput};
 use crate::choices;
@@ -41,6 +43,7 @@ use crate::palette::{self, Palette};
 use crate::palette_preview::PalettePreview;
 use crate::profile::{self, Profile, Profiles};
 use crate::settings::{AppSettings, key};
+use crate::shortcuts;
 
 const DEFAULT_HEIGHT: i32 = 700;
 const MIN_WIDTH: i32 = 360;
@@ -49,6 +52,9 @@ const PALETTE_CSS_CLASS: &str = "palette";
 const PALETTE_SUFFIX: &str = ".palette";
 const PALETTE_RELOAD_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 const DEFAULT_PROFILE_ACTIONS: &str = "default-profile";
+const SHORTCUTS_PAGE_NAME: &str = "shortcuts";
+const SHORTCUT_DISABLED_PAGE: &str = "disabled";
+const SHORTCUT_LABEL_PAGE: &str = "label";
 const SHOW_ALL_PALETTES: (&str, &str) = ("Show All Palettes", "down-small-symbolic");
 const SHOW_FEWER_PALETTES: (&str, &str) = ("Show Fewer Palettes", "up-small-symbolic");
 
@@ -85,6 +91,12 @@ pub enum PreferencesInput {
     AddProfile,
     EditProfile(String),
     SelectFont,
+    /// Show the Shortcuts page (`ptyxis_preferences_window_edit_shortcuts()`).
+    ShowShortcuts,
+    EditShortcut {
+        key: &'static str,
+        title: &'static str,
+    },
 }
 
 pub struct Preferences {
@@ -100,6 +112,8 @@ pub struct Preferences {
     show_more: adw::ButtonContent,
     profiles_list: gtk::ListBox,
     profile_editor: Option<Controller<ProfileEditor>>,
+    shortcut_settings: Option<gio::Settings>,
+    accel_dialog: Option<Controller<AccelDialog>>,
     /// Profiles shown in the list, kept alive for their label handlers.
     listed_profiles: Vec<Profile>,
     /// Handlers on shared objects, disconnected on shutdown.
@@ -580,6 +594,14 @@ impl Component for Preferences {
         }
         root.add(&behavior);
 
+        // Shortcuts
+        let shortcut_settings = shortcuts::open_settings()
+            .inspect_err(|e| glib::g_warning!("Ptyxis", "Shortcut settings unavailable: {e}"))
+            .ok();
+        if let Some(settings) = &shortcut_settings {
+            root.add(&shortcuts_page(settings, input));
+        }
+
         // Profiles
         let profiles_page = widgets::page("Profiles", "system-users-symbolic");
         let profiles_list = widgets::boxed_list();
@@ -654,6 +676,8 @@ impl Component for Preferences {
             show_more,
             profiles_list,
             profile_editor: None,
+            shortcut_settings,
+            accel_dialog: None,
             listed_profiles: Vec::new(),
             shared_handlers,
             _palette_monitors: palette_monitors,
@@ -710,6 +734,24 @@ impl Component for Preferences {
             }
             PreferencesInput::EditProfile(uuid) => self.edit_profile(root, &uuid),
             PreferencesInput::SelectFont => self.select_font(root),
+            PreferencesInput::ShowShortcuts => {
+                root.pop_subpage();
+                root.set_visible_page_name(SHORTCUTS_PAGE_NAME);
+            }
+            PreferencesInput::EditShortcut { key, title } => {
+                let Some(settings) = self.shortcut_settings.clone() else {
+                    return;
+                };
+                let dialog = AccelDialog::builder()
+                    .launch(AccelDialogInit {
+                        title: title.to_owned(),
+                        settings,
+                        key,
+                    })
+                    .detach();
+                dialog.widget().present(Some(root));
+                self.accel_dialog = Some(dialog);
+            }
         }
     }
 
@@ -721,6 +763,81 @@ impl Component for Preferences {
             object.disconnect(id);
         }
     }
+}
+
+/// The Shortcuts page: one row per shortcut key, grouped as in the C
+/// template (`PtyxisShortcutRow`).
+fn shortcuts_page(
+    settings: &gio::Settings,
+    input: &relm4::Sender<PreferencesInput>,
+) -> adw::PreferencesPage {
+    let page = widgets::page(
+        "Shortcuts",
+        "preferences-desktop-keyboard-shortcuts-symbolic",
+    );
+    page.set_name(Some(SHORTCUTS_PAGE_NAME));
+    for (title, entries) in shortcuts::EDITOR_GROUPS {
+        let group = widgets::group(*title);
+        for entry in *entries {
+            group.add(&shortcut_row(settings, entry, input));
+        }
+        page.add(&group);
+    }
+    page
+}
+
+fn shortcut_row(
+    settings: &gio::Settings,
+    entry: &shortcuts::ShortcutEntry,
+    input: &relm4::Sender<PreferencesInput>,
+) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(entry.title)
+        .activatable(true)
+        .build();
+    if let Some(subtitle) = entry.subtitle {
+        row.set_subtitle(subtitle);
+    }
+    let label = adw::ShortcutLabel::new("");
+    label.set_halign(gtk::Align::End);
+    label.set_valign(gtk::Align::Center);
+    let stack = gtk::Stack::new();
+    stack.add_named(
+        &gtk::Label::builder()
+            .label("disabled")
+            .css_classes(["dim-label"])
+            .build(),
+        Some(SHORTCUT_DISABLED_PAGE),
+    );
+    stack.add_named(&label, Some(SHORTCUT_LABEL_PAGE));
+    row.add_suffix(&stack);
+
+    let update = move |settings: &gio::Settings, key: &str| {
+        let value = settings.string(key);
+        let enabled = shortcuts::effective_accel(&value)
+            .and_then(gtk::accelerator_parse)
+            .is_some();
+        label.set_accelerator(&value);
+        stack.set_visible_child_name(if enabled {
+            SHORTCUT_LABEL_PAGE
+        } else {
+            SHORTCUT_DISABLED_PAGE
+        });
+    };
+    update(settings, entry.key);
+    settings.connect_changed(Some(entry.key), update);
+
+    // Activation goes through a row action like the C row's
+    // "shortcut.select", which also exposes it to assistive technologies.
+    let actions = gio::SimpleActionGroup::new();
+    let select = gio::SimpleAction::new("select", None);
+    let input = input.clone();
+    let (key, title) = (entry.key, entry.title);
+    select.connect_activate(move |_, _| input.emit(PreferencesInput::EditShortcut { key, title }));
+    actions.add_action(&select);
+    row.insert_action_group("shortcut", Some(&actions));
+    row.set_action_name(Some("shortcut.select"));
+    row
 }
 
 /// The "Font" group: system font switch expanding into a custom font row.

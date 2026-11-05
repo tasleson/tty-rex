@@ -309,6 +309,14 @@ impl App {
         window
     }
 
+    /// Shows the Shortcuts page of the preferences window.
+    pub fn show_shortcuts(&self, transient_for: Option<&gtk::Window>) {
+        self.show_preferences(transient_for);
+        if let Some(preferences) = self.preferences.borrow().as_ref() {
+            preferences.emit(PreferencesInput::ShowShortcuts);
+        }
+    }
+
     /// Opens the editor for a profile in the preferences window.
     pub fn edit_profile(&self, uuid: &str) {
         self.show_preferences(None);
