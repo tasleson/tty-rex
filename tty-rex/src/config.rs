@@ -31,6 +31,10 @@ pub const APP_ID: &str = match option_env!("TTY_REX_APP_ID") {
 /// Displayed application name and program name.
 pub const APP_NAME: &str = "tty-rex";
 
+/// Project home page and issue tracker, shown in the About dialog.
+pub const WEBSITE: &str = "https://github.com/tasleson/tty-rex";
+pub const ISSUE_URL: &str = "https://github.com/tasleson/tty-rex/issues";
+
 /// Version advertised to child processes via `PTYXIS_VERSION`.
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 

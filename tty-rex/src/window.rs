@@ -528,9 +528,14 @@ fn build_primary_menu() -> gio::Menu {
     section.append_item(&RelmAction::<ShowKeyboardShortcutsAction>::to_menu_item(
         "_Keyboard Shortcuts",
     ));
+    let about_label = format!("_About {}", config::APP_NAME);
+    section.append(Some(&about_label), Some(ABOUT_ACTION));
     menu.append_section(None, &section);
     menu
 }
+
+/// Application action showing the About dialog (`app.about`).
+const ABOUT_ACTION: &str = "app.about";
 
 impl Component for Window {
     type Init = WindowInit;

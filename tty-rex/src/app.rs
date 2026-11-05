@@ -128,6 +128,7 @@ pub struct App {
 
 relm4::new_action_group!(AppActions, "app");
 relm4::new_stateless_action!(PreferencesAction, AppActions, "preferences");
+relm4::new_stateless_action!(AboutAction, AppActions, "about");
 // Desktop actions of the D-Bus activatable desktop file; GNOME Shell also
 // launches through `new-window` (`ptyxis_application_new_window_action()`).
 relm4::new_stateless_action!(NewWindowAction, AppActions, "new-window");
@@ -137,6 +138,13 @@ relm4::new_stateful_action!(EditProfileAction, AppActions, "edit-profile", Strin
 /// tty-rex's icon, named after the default application id like the desktop
 /// file's `Icon=`, so builds with another id (e.g. `.Devel`) find it too.
 const ICON_NAME: &str = "io.github.tasleson.TtyRex";
+/// tty-rex is ported from Ptyxis, so the About dialog credits its author
+/// and keeps its copyright (`ptyxis_application_about()`).
+const PTYXIS_DEVELOPER: &str = "Christian Hergert";
+const COPYRIGHT: &str = "© 2023-2024 Christian Hergert, et al.";
+const BASED_ON_TITLE: &str = "Based on";
+const PTYXIS_CREDIT: &str = "Ptyxis by Christian Hergert https://gitlab.gnome.org/chergert/ptyxis";
+
 /// Icon used while tty-rex's own icon is not installed.
 const FALLBACK_ICON_NAME: &str = "org.gnome.Ptyxis";
 
@@ -218,6 +226,13 @@ impl App {
             }
         });
         application.add_action(preferences.gio_action());
+        let weak = Rc::downgrade(&app);
+        let about = RelmAction::<AboutAction>::new_stateless(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.show_about();
+            }
+        });
+        application.add_action(about.gio_action());
         let weak = Rc::downgrade(&app);
         let edit_profile =
             RelmAction::<EditProfileAction>::new_with_target_value(move |_, uuid| {
@@ -349,6 +364,26 @@ impl App {
         }
         window.present();
         window
+    }
+
+    /// Shows the About dialog over the active window.
+    pub fn show_about(&self) {
+        // The icon chosen at startup: tty-rex's own, or the Ptyxis fallback.
+        let icon = gtk::Window::default_icon_name()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| FALLBACK_ICON_NAME.to_owned());
+        let dialog = adw::AboutDialog::builder()
+            .application_name(config::APP_NAME)
+            .application_icon(icon)
+            .version(config::PACKAGE_VERSION)
+            .developers([PTYXIS_DEVELOPER])
+            .copyright(COPYRIGHT)
+            .license_type(gtk::License::Gpl30)
+            .website(config::WEBSITE)
+            .issue_url(config::ISSUE_URL)
+            .build();
+        dialog.add_acknowledgement_section(Some(BASED_ON_TITLE), &[PTYXIS_CREDIT]);
+        dialog.present(self.application.active_window().as_ref());
     }
 
     /// Shows the Shortcuts page of the preferences window.
