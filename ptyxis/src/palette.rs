@@ -214,25 +214,35 @@ struct FaceReader<'a> {
 }
 
 impl FaceReader<'_> {
-    fn optional(&self, key: &str) -> Result<Option<gdk::RGBA>, PaletteError> {
-        let Ok(value) = self.key_file.string(self.group, key) else {
-            return Ok(None);
-        };
-        gdk::RGBA::parse(value.as_str())
-            .map(Some)
-            .map_err(|_| PaletteError::InvalidColor {
+    fn parse(&self, key: &str) -> Option<Result<gdk::RGBA, PaletteError>> {
+        let value = self.key_file.string(self.group, key).ok()?;
+        Some(
+            gdk::RGBA::parse(value.as_str()).map_err(|_| PaletteError::InvalidColor {
                 source_name: self.source_name.to_owned(),
                 group: self.group.to_owned(),
                 key: key.to_owned(),
                 value: value.to_string(),
-            })
+            }),
+        )
+    }
+
+    /// An optional color; like the C loader, a malformed value is ignored
+    /// so the derived default applies instead of rejecting the palette.
+    fn optional(&self, key: &str) -> Result<Option<gdk::RGBA>, PaletteError> {
+        Ok(self.parse(key).and_then(|result| {
+            result
+                .inspect_err(|e| glib::g_warning!("Ptyxis", "{e}; using the default"))
+                .ok()
+        }))
     }
 
     fn required(&self, key: &str) -> Result<gdk::RGBA, PaletteError> {
-        self.optional(key)?.ok_or_else(|| PaletteError::MissingKey {
-            source_name: self.source_name.to_owned(),
-            group: self.group.to_owned(),
-            key: key.to_owned(),
+        self.parse(key).unwrap_or_else(|| {
+            Err(PaletteError::MissingKey {
+                source_name: self.source_name.to_owned(),
+                group: self.group.to_owned(),
+                key: key.to_owned(),
+            })
         })
     }
 
@@ -843,9 +853,14 @@ mod tests {
         assert_eq!(face.remote.background, rgba("#040404"));
         assert_eq!(face.titlebar_background, rgba("#050505"));
 
+        // Malformed optional colors fall back to the defaults.
         let bad = format!("[Palette]\nName=S\n{MINIMAL_COLORS}RemoteBackground=nope\n");
-        let err = Palette::parse("s", "s", &bad).unwrap_err();
-        assert!(err.to_string().contains("RemoteBackground"), "{err}");
+        let face = Palette::parse("s", "s", &bad).unwrap().face(true).clone();
+        assert_close(
+            &face.remote.background,
+            &mix(&face.indexed[12], &face.background, 0.33),
+            "malformed remote background",
+        );
     }
 
     #[test]
