@@ -524,7 +524,7 @@ pub(crate) fn use_memory_backend() {
 /// Helpers for validating Rust constants against the schema template.
 #[cfg(test)]
 pub(crate) mod schema_template {
-    pub const TEMPLATE: &str = include_str!("../../../src/org.gnome.Ptyxis.gschema.xml.in");
+    pub const TEMPLATE: &str = include_str!("../ptyxis/org.gnome.Ptyxis.gschema.xml.in");
 
     /// Returns the XML body of the element starting with `open_tag`.
     fn block(open_tag: &str, close_tag: &str) -> &'static str {

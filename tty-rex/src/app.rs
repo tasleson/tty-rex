@@ -45,7 +45,7 @@ use crate::tab::{Tab, TabInit, TabInput};
 use crate::terminal::ZoomLevel;
 use crate::window::{NewTabWithProfileAction, Window, WindowInit, WindowInput};
 
-/// Icons from `src/icons/`, compiled by `build.rs`.
+/// Icons from `ptyxis/icons/`, compiled by `build.rs`.
 static RESOURCES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ptyxis.gresource"));
 
 fn register_resources() {
@@ -56,7 +56,7 @@ fn register_resources() {
 }
 
 /// The C build's stylesheet, shared so widgets ported from it look the same.
-const STYLESHEET: &str = include_str!("../../../src/style.css");
+const STYLESHEET: &str = include_str!("../ptyxis/style.css");
 
 /// Parameters for a new tab; unset fields use profile/settings defaults.
 #[derive(Debug, Clone, Default)]

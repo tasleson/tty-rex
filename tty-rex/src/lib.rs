@@ -27,7 +27,7 @@
 //! ```
 //!
 //! `build.rs` generates the GSettings schema from
-//! `src/org.gnome.Ptyxis.gschema.xml.in` and compiles it into Cargo's
+//! `ptyxis/org.gnome.Ptyxis.gschema.xml.in` and compiles it into Cargo's
 //! `OUT_DIR`. The binary prefers that compiled schema automatically unless
 //! `GSETTINGS_SCHEMA_DIR` is set, so no installation step is needed. The
 //! schema id is the stable `org.gnome.Ptyxis` so existing profiles and

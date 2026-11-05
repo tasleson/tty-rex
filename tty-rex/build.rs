@@ -17,19 +17,19 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Generates build-time assets from the shared C source tree.
+//! Generates build-time assets from the files copied from Ptyxis.
 //!
-//! The GSettings schema is produced from `src/org.gnome.Ptyxis.gschema.xml.in`
-//! using the same substitutions as `src/meson.build` (non-development
+//! The GSettings schema is produced from `ptyxis/org.gnome.Ptyxis.gschema.xml.in`
+//! using the same substitutions as Ptyxis's `src/meson.build` (non-development
 //! values, so existing user configuration under `/org/gnome/Ptyxis/` is
 //! read) and compiled with `glib-compile-schemas` so the binary can run
 //! uninstalled.
 //!
-//! The bundled palettes in `src/palettes/` are embedded into the binary
+//! The bundled palettes in `ptyxis/palettes/` are embedded into the binary
 //! (the C build does the same via GResource), keyed by file stem.
 //!
-//! The icons in `src/icons/` are compiled into a GResource at the same
-//! paths as in `src/ptyxis.gresource.xml`, so GTK finds them through the
+//! The icons in `ptyxis/icons/` are compiled into a GResource at the same
+//! paths as in Ptyxis's `src/ptyxis.gresource.xml`, so GTK finds them through the
 //! application's resource base path.
 
 use std::env;
@@ -37,6 +37,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Assets copied from the Ptyxis source tree, see `ptyxis/README.md`.
+const PTYXIS_ASSETS_DIR: &str = "ptyxis";
 const SCHEMA_ID: &str = "org.gnome.Ptyxis";
 const SCHEMA_PATH: &str = "/org/gnome/Ptyxis/";
 const SCHEMA_TEMPLATE: &str = "org.gnome.Ptyxis.gschema.xml.in";
@@ -46,9 +48,9 @@ const ICONS_DIR: &str = "icons";
 const RESOURCE_PREFIX: &str = "/org/gnome/Ptyxis";
 const RESOURCE_FILE: &str = "ptyxis.gresource";
 
-fn c_source_dir() -> PathBuf {
+fn ptyxis_assets_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("set by cargo"));
-    manifest_dir.join("..").join("..").join("src")
+    manifest_dir.join(PTYXIS_ASSETS_DIR)
 }
 
 /// Mirrors the `schema_config` substitutions in `src/meson.build`.
@@ -203,7 +205,7 @@ fn generate_resources(src_dir: &Path, out_dir: &Path) {
 
 fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("set by cargo"));
-    let src_dir = c_source_dir();
+    let src_dir = ptyxis_assets_dir();
 
     println!("cargo::rerun-if-changed=build.rs");
     generate_schema(&src_dir, &out_dir);

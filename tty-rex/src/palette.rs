@@ -17,7 +17,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Color palettes in the `.palette` key-file format of `src/palettes/`
+//! Color palettes in the `.palette` key-file format of `ptyxis/palettes/`
 //! (see `src/ptyxis-palette.c`).
 //!
 //! A palette either has `[Light]` and `[Dark]` groups, or puts a single
