@@ -4,7 +4,7 @@ tty-rex is an experimental Rust port of the
 [Ptyxis](https://gitlab.gnome.org/chergert/ptyxis) terminal GUI, written
 with [relm4](https://relm4.org/). It started as a branch of Ptyxis and
 uses its GSettings schema, palettes, icons and stylesheet, copied into
-`tty-rex/ptyxis/`. It does not use `ptyxis-agent`. It needs the GTK,
+`ptyxis/`. It does not use `ptyxis-agent`. It needs the GTK,
 libadwaita and VTE development packages plus Rust 1.93 or newer:
 
 ```bash
@@ -12,7 +12,7 @@ cargo run
 ```
 
 No installation is required: `build.rs` generates the schema from
-`tty-rex/ptyxis/org.gnome.Ptyxis.gschema.xml.in`, compiles it with
+`ptyxis/org.gnome.Ptyxis.gschema.xml.in`, compiles it with
 `glib-compile-schemas`, and the binary uses that compiled schema unless
 `GSETTINGS_SCHEMA_DIR` is set. tty-rex uses its own application id,
 `io.github.tasleson.TtyRex`, but reads and writes the regular
@@ -42,7 +42,7 @@ Like Ptyxis, tty-rex has a D-Bus activatable desktop file, so the desktop
 starts it on demand through the session bus, in its own systemd user unit.
 Running `tty-rex` from a shell still starts it directly. Unlike Ptyxis, its
 shells stay in the same unit as the UI because they are not started
-through `ptyxis-agent`. `tty-rex/data/` holds the desktop file, the D-Bus
+through `ptyxis-agent`. `data/` holds the desktop file, the D-Bus
 activation file, the unit and the icon; fill in the directory holding the
 `tty-rex` binary and install them for your user:
 
@@ -51,14 +51,14 @@ cargo build --release
 BINDIR=$PWD/target/release   # or wherever you copied tty-rex
 APP_ID=io.github.tasleson.TtyRex
 mkdir -p ~/.local/share/dbus-1/services ~/.config/systemd/user
-sed "s|@bindir@|$BINDIR|g" tty-rex/data/$APP_ID.service.in \
+sed "s|@bindir@|$BINDIR|g" data/$APP_ID.service.in \
   > ~/.local/share/dbus-1/services/$APP_ID.service
-sed "s|@bindir@|$BINDIR|g" tty-rex/data/tty-rex.service.in \
+sed "s|@bindir@|$BINDIR|g" data/tty-rex.service.in \
   > ~/.config/systemd/user/app-$APP_ID.service
 mkdir -p ~/.local/share/applications ~/.local/share/icons
-sed "s|@bindir@|$BINDIR|g" tty-rex/data/$APP_ID.desktop.in \
+sed "s|@bindir@|$BINDIR|g" data/$APP_ID.desktop.in \
   > ~/.local/share/applications/$APP_ID.desktop
-cp -r tty-rex/data/icons/hicolor ~/.local/share/icons/
+cp -r data/icons/hicolor ~/.local/share/icons/
 systemctl --user daemon-reload
 ```
 
