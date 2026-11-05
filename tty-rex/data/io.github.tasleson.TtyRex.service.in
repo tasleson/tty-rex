@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.tasleson.TtyRex
+Exec=@bindir@/tty-rex --gapplication-service
+SystemdService=app-io.github.tasleson.TtyRex.service

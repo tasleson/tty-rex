@@ -1,0 +1,12 @@
+[Unit]
+Description=tty-rex
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=io.github.tasleson.TtyRex
+ExecStart=@bindir@/tty-rex --gapplication-service
+Slice=app.slice
+# Unlike Ptyxis, tty-rex does not start shells through ptyxis-agent yet, so
+# they share this unit's cgroup and there is no per-tab scope for oomd to
+# prefer. Add ManagedOOMPreference=avoid once there is.
