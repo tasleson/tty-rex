@@ -33,6 +33,7 @@ use gtk::{gio, prelude::*};
 /// Long option names, shared by registration and lookup.
 pub mod option {
     pub const EXECUTE: &str = "execute";
+    pub const IMPORT_PALETTE: &str = "import-palette";
     pub const NEW_WINDOW: &str = "new-window";
     pub const STANDALONE: &str = "standalone";
     pub const TAB: &str = "tab";
@@ -92,6 +93,15 @@ const OPTIONS: &[OptionSpec] = &[
         description: "Start a new instance, ignoring existing instances",
         arg_description: None,
     },
+    // Handled before GApplication runs (see `preprocess_args`); registered
+    // so it shows up in --help like in the C version.
+    OptionSpec {
+        long: option::IMPORT_PALETTE,
+        short: None,
+        arg: glib::OptionArg::String,
+        description: "Import a Ptyxis palette file",
+        arg_description: Some("FILE"),
+    },
     OptionSpec {
         long: option::TITLE,
         short: Some(b'T'),
@@ -109,7 +119,10 @@ const SUMMARY: &str = "Examples:
 
   Run Custom Command in New Window
     ptyxis -x \"bash -c 'sleep 3'\"
-    ptyxis -- bash -c 'sleep 3'";
+    ptyxis -- bash -c 'sleep 3'
+
+  Import a custom palette
+    ptyxis --import-palette my.palette";
 
 /// Registers the supported options on the application.
 pub fn register_options(application: &impl IsA<gio::Application>) {
@@ -133,6 +146,8 @@ pub struct EarlyArgs {
     pub args: Vec<String>,
     /// Run as a separate, non-unique instance.
     pub standalone: bool,
+    /// `--import-palette FILE`: copy the file and exit without starting.
+    pub import_palette: Option<PathBuf>,
 }
 
 /// Rewrites `-e`/`--` into `-x` with a shell-quoted command and decides
@@ -143,9 +158,21 @@ pub fn preprocess_args(args: Vec<String>) -> EarlyArgs {
     let mut wants_shared = false;
     let mut wants_standalone = false;
     let mut explicit_standalone = false;
+    let mut import_palette = None;
+    let import_flag = format!("--{}", option::IMPORT_PALETTE);
+    let import_prefix = format!("{import_flag}=");
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
+        if arg == import_flag {
+            import_palette = iter.next().map(PathBuf::from);
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix(&import_prefix) {
+            import_palette = Some(PathBuf::from(path));
+            continue;
+        }
+
         match arg.as_str() {
             "--tab" | "--new-window" | "--tab-with-profile" => wants_shared = true,
             a if a.starts_with("--tab-with-profile=") => wants_shared = true,
@@ -178,6 +205,7 @@ pub fn preprocess_args(args: Vec<String>) -> EarlyArgs {
     EarlyArgs {
         args: out,
         standalone: explicit_standalone || (wants_standalone && !wants_shared),
+        import_palette,
     }
 }
 
@@ -363,6 +391,37 @@ mod tests {
             let early = preprocess_args(strings(input));
             assert_eq!(early.args, strings(args), "{input:?}");
             assert_eq!(early.standalone, *standalone, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn import_palette_is_extracted() {
+        let cases: &[(&[&str], &[&str], Option<&str>)] = &[
+            (
+                &["ptyxis", "--import-palette", "a.palette"],
+                &["ptyxis"],
+                Some("a.palette"),
+            ),
+            (
+                &["ptyxis", "--import-palette=b.palette", "-s"],
+                &["ptyxis", "-s"],
+                Some("b.palette"),
+            ),
+            (
+                &["ptyxis", "--", "echo", "--import-palette"],
+                &["ptyxis", "-x", "'echo' '--import-palette'"],
+                None,
+            ),
+            (&["ptyxis", "--tab"], &["ptyxis", "--tab"], None),
+        ];
+        for (input, args, palette) in cases {
+            let early = preprocess_args(strings(input));
+            assert_eq!(early.args, strings(args), "{input:?}");
+            assert_eq!(
+                early.import_palette.as_deref(),
+                palette.map(Path::new),
+                "{input:?}"
+            );
         }
     }
 

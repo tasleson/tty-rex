@@ -297,6 +297,117 @@ fn lookup_builtin(id: &str) -> Option<Palette> {
     Some(palette)
 }
 
+/// User palettes from every directory; an id found in an earlier (more
+/// specific) directory hides the same id in later ones, as lookups do.
+fn user_palettes() -> Vec<Palette> {
+    let mut palettes: Vec<Palette> = Vec::new();
+    for dir in user_palettes_dirs(&glib::user_data_dir(), config::APP_ID) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
+            let Some(id) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(PALETTE_SUFFIX))
+            else {
+                continue;
+            };
+            match std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|data| {
+                    Palette::parse(id, &path.display().to_string(), &data)
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(palette) if !palettes.iter().any(|p| p.id() == palette.id()) => {
+                    palettes.push(palette)
+                }
+                Ok(_) => {}
+                Err(e) => glib::g_warning!("Ptyxis", "Ignoring user palette: {e}"),
+            }
+        }
+    }
+    palettes
+}
+
+/// Sorts palettes by name the way the C list model's string sorter does
+/// (case-insensitively).
+pub fn sort_by_name(palettes: &mut [Palette]) {
+    palettes.sort_by_cached_key(|p| p.name().to_lowercase());
+}
+
+/// Every bundled and user palette, sorted by name, as
+/// `ptyxis_palette_get_all()` lists them.
+pub fn all() -> Vec<Palette> {
+    let mut palettes: Vec<Palette> = BUILTIN_PALETTES
+        .iter()
+        .filter_map(|(id, _)| lookup_builtin(id))
+        .chain(user_palettes())
+        .collect();
+    sort_by_name(&mut palettes);
+    palettes
+}
+
+/// Directory palettes are imported into (`ptyxis_get_user_palettes_dir()`).
+pub fn import_dir() -> PathBuf {
+    user_palettes_dirs(&glib::user_data_dir(), config::APP_ID).swap_remove(0)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    #[error("{}: {source}", path.display())]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("{} has no file name", .0.display())]
+    NoFileName(PathBuf),
+    #[error("{} already exists.\nPlease remove it first.", .0.display())]
+    AlreadyExists(PathBuf),
+}
+
+/// Copies a palette file into `dest_dir` like `ptyxis --import-palette`
+/// (`check_early_opts()` in `src/main.c`): an existing file of the same
+/// name is never overwritten. Returns the destination path.
+pub fn import(source: &Path, dest_dir: &Path) -> Result<PathBuf, ImportError> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let io_error = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| ImportError::Io { path, source }
+    };
+    let name = source
+        .file_name()
+        .ok_or_else(|| ImportError::NoFileName(source.to_path_buf()))?;
+    let contents = std::fs::read(source).map_err(io_error(source))?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o750)
+        .create(dest_dir)
+        .map_err(io_error(dest_dir))?;
+    let dest = dest_dir.join(name);
+    // create_new is atomic and refuses any existing entry, including a
+    // dangling symlink, so the import can never write through one.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest)
+        .map_err(|source| match source.kind() {
+            std::io::ErrorKind::AlreadyExists => ImportError::AlreadyExists(dest.clone()),
+            _ => ImportError::Io {
+                path: dest.clone(),
+                source,
+            },
+        })?;
+    if let Err(source) = std::io::Write::write_all(&mut file, &contents) {
+        drop(file);
+        // Do not leave a truncated palette behind.
+        let _ = std::fs::remove_file(&dest);
+        return Err(ImportError::Io { path: dest, source });
+    }
+    Ok(dest)
+}
+
 /// Looks up a palette by id, preferring user palettes like the C version.
 pub fn lookup(id: &str) -> Option<Palette> {
     if id.is_empty() || id.contains('/') {
@@ -405,6 +516,62 @@ mod tests {
             lookup_or_default("definitely-not-a-palette").map(|p| p.id().to_owned()),
             Some(DEFAULT_PALETTE_ID.to_owned())
         );
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ptyxis-palette-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn importing_palettes() {
+        let scratch = scratch_dir("import");
+        let source_dir = scratch.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("Mine.palette");
+        std::fs::write(&source, "[Palette]\nName=Mine\n").unwrap();
+        let dest_dir = scratch.join("nested/palettes");
+
+        let dest = import(&source, &dest_dir).expect("first import succeeds");
+        assert_eq!(dest, dest_dir.join("Mine.palette"));
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+
+        let err = import(&source, &dest_dir).unwrap_err();
+        assert!(matches!(err, ImportError::AlreadyExists(_)), "{err}");
+        assert!(err.to_string().contains("Please remove it first"));
+
+        // A dangling symlink at the destination is refused, not followed.
+        let link_target = scratch.join("outside.palette");
+        std::os::unix::fs::symlink(&link_target, dest_dir.join("Linked.palette")).unwrap();
+        let linked_source = source_dir.join("Linked.palette");
+        std::fs::write(&linked_source, "[Palette]\nName=Linked\n").unwrap();
+        let err = import(&linked_source, &dest_dir).unwrap_err();
+        assert!(matches!(err, ImportError::AlreadyExists(_)), "{err}");
+        assert!(
+            !link_target.exists(),
+            "import must not write through the symlink"
+        );
+
+        let err = import(&source_dir.join("missing.palette"), &dest_dir).unwrap_err();
+        assert!(matches!(err, ImportError::Io { .. }), "{err}");
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    #[test]
+    fn listing_is_sorted_case_insensitively() {
+        let mut palettes: Vec<Palette> = ["tango", "3024", "Aci", "gnome"]
+            .iter()
+            .map(|id| lookup_builtin(id).unwrap())
+            .collect();
+        sort_by_name(&mut palettes);
+        let names: Vec<_> = palettes.iter().map(|p| p.name().to_owned()).collect();
+        assert_eq!(names, ["3024", "Aci", "GNOME", "Tango"]);
+        assert!(all().len() >= BUILTIN_PALETTES.len());
     }
 
     #[test]

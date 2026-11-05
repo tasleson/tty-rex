@@ -336,6 +336,17 @@ pub fn run() -> glib::ExitCode {
     glib::set_application_name(config::APP_NAME);
 
     let early = cli::preprocess_args(std::env::args().collect());
+    // Like src/main.c, importing happens synchronously before any instance
+    // is started or contacted.
+    if let Some(source) = &early.import_palette {
+        return match crate::palette::import(source, &crate::palette::import_dir()) {
+            Ok(_) => glib::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                glib::ExitCode::FAILURE
+            }
+        };
+    }
     let mut flags = gio::ApplicationFlags::HANDLES_COMMAND_LINE;
     if early.standalone {
         flags |= gio::ApplicationFlags::NON_UNIQUE | gio::ApplicationFlags::CAN_OVERRIDE_APP_ID;
