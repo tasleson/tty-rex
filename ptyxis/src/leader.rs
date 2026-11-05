@@ -53,14 +53,32 @@ impl LeaderKind {
             _ => Self::Unknown,
         }
     }
+}
 
-    /// Icon shown on the tab, as in `ptyxis_tab_dup_icon()`. Containers
-    /// keep the default icon until the port knows about containers.
-    pub fn icon_name(self) -> Option<&'static str> {
-        match self {
-            Self::Superuser => Some("process-superuser-symbolic"),
-            Self::Remote => Some("process-remote-symbolic"),
-            Self::Unknown | Self::Container => None,
+/// Icon of the container runtime a shell reported through VTE's
+/// `vte.container.runtime` termprop, matching the icons the agent's
+/// container providers set (distrobox containers are podman ones).
+pub fn container_icon_name(runtime: &str) -> Option<&'static str> {
+    match runtime {
+        "podman" | "distrobox" => Some("container-podman-symbolic"),
+        "toolbox" => Some("container-toolbox-symbolic"),
+        "jhbuild" => Some("container-jhbuild-symbolic"),
+        _ => None,
+    }
+}
+
+/// Icon shown on the tab, as in `ptyxis_tab_dup_icon()`: superuser and
+/// remote leaders win, otherwise the container the shell runs in, if any.
+///
+/// The C build looks the container up among those the agent discovered
+/// and falls back to the tab's or profile's container; the port spawns
+/// only on the host, so the reported runtime is all it has.
+pub fn tab_icon_name(kind: LeaderKind, container_runtime: Option<&str>) -> Option<&'static str> {
+    match kind {
+        LeaderKind::Superuser => Some("process-superuser-symbolic"),
+        LeaderKind::Remote => Some("process-remote-symbolic"),
+        LeaderKind::Unknown | LeaderKind::Container => {
+            container_runtime.and_then(container_icon_name)
         }
     }
 }
@@ -118,15 +136,33 @@ mod tests {
 
     #[test]
     fn icons() {
-        assert_eq!(
-            LeaderKind::Superuser.icon_name(),
-            Some("process-superuser-symbolic")
-        );
-        assert_eq!(
-            LeaderKind::Remote.icon_name(),
-            Some("process-remote-symbolic")
-        );
-        assert_eq!(LeaderKind::Unknown.icon_name(), None);
+        use LeaderKind::*;
+        let cases = [
+            (
+                Superuser,
+                Some("toolbox"),
+                Some("process-superuser-symbolic"),
+            ),
+            (Remote, None, Some("process-remote-symbolic")),
+            (Unknown, None, None),
+            (Unknown, Some("toolbox"), Some("container-toolbox-symbolic")),
+            (Container, Some("podman"), Some("container-podman-symbolic")),
+            (
+                Unknown,
+                Some("distrobox"),
+                Some("container-podman-symbolic"),
+            ),
+            (Unknown, Some("jhbuild"), Some("container-jhbuild-symbolic")),
+            (Container, Some("lxc"), None),
+            (Container, None, None),
+        ];
+        for (kind, runtime, expected) in cases {
+            assert_eq!(
+                tab_icon_name(kind, runtime),
+                expected,
+                "{kind:?} {runtime:?}"
+            );
+        }
     }
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {

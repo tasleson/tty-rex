@@ -407,6 +407,24 @@ impl Tab {
         });
     }
 
+    /// Shows the leader's or the container's icon on the page, as
+    /// `ptyxis_tab_dup_icon()` does.
+    fn update_icon(&self, root: &gtk::Box) {
+        let Some((_, page)) = find_page(root) else {
+            return;
+        };
+        let runtime = terminal::container_runtime(&self.terminal);
+        let wanted = leader::tab_icon_name(self.leader_kind, runtime.as_deref());
+        let current = page
+            .icon()
+            .and_downcast::<gio::ThemedIcon>()
+            .and_then(|icon| icon.names().first().map(|name| name.to_string()));
+        // Setting an equal icon would still redraw the tab bar.
+        if current.as_deref() != wanted {
+            page.set_icon(wanted.map(gio::ThemedIcon::new).as_ref());
+        }
+    }
+
     /// Records a new leader; returns whether it changed.
     fn set_leader_kind(&mut self, kind: LeaderKind, root: &gtk::Box) -> bool {
         if kind == self.leader_kind {
@@ -418,8 +436,6 @@ impl Tab {
             if tab_view.selected_page().as_ref() != Some(&page) {
                 page.set_needs_attention(true);
             }
-            let icon = kind.icon_name().map(gio::ThemedIcon::new);
-            page.set_icon(icon.as_ref());
         }
         self.update_dressing();
         true
@@ -570,6 +586,9 @@ impl Component for Tab {
         });
         let input = sender.input_sender().clone();
         terminal.connect_bell(move |_| input.emit(TabInput::Bell));
+        // The update after any message refreshes the icon.
+        let input = sender.input_sender().clone();
+        terminal::connect_container_changed(&terminal, move |_| input.emit(TabInput::UpdateTitle));
         let input = sender.input_sender().clone();
         terminal.connect_increase_font_size(move |_| input.emit(TabInput::ZoomIn));
         let input = sender.input_sender().clone();
@@ -813,8 +832,10 @@ impl Component for Tab {
                 self.terminal.grab_focus();
             }
         }
-        // Title depends on state and settings, so refresh after any change.
+        // Title and icon depend on state and settings, so refresh after
+        // any change.
         self.update_title(root);
+        self.update_icon(root);
     }
 
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {

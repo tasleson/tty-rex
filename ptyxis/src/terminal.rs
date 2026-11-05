@@ -67,6 +67,9 @@ pub fn create() -> vte::Terminal {
     terminal.set_enable_fallback_scrolling(false);
     terminal.set_scroll_unit_is_pixels(true);
     terminal.set_allow_hyperlink(true);
+    // Shells in toolbox and other containers report the container with
+    // OSC 777, which sets the `vte.container.*` termprops.
+    terminal.set_enable_legacy_osc777(true);
     // The window paints the background (see `dressing`), which lets
     // profile opacity show through like the C build.
     terminal.set_clear_background(false);
@@ -182,6 +185,30 @@ pub fn connect_current_directory_uri_changed(
 ) -> glib::SignalHandlerId {
     #[allow(deprecated)]
     terminal.connect_current_directory_uri_changed(f)
+}
+
+/// Termprops set by shells inside containers (OSC 777 `container;push`).
+const TERMPROP_CONTAINER_NAME: &str = "vte.container.name";
+const TERMPROP_CONTAINER_RUNTIME: &str = "vte.container.runtime";
+
+/// Runtime of the container the shell reported running in, if any.
+pub fn container_runtime(terminal: &vte::Terminal) -> Option<String> {
+    terminal
+        .termprop_string(TERMPROP_CONTAINER_RUNTIME)
+        .0
+        .map(|runtime| runtime.to_string())
+        .filter(|runtime| !runtime.is_empty())
+}
+
+/// Calls `f` whenever the reported container name or runtime changes.
+pub fn connect_container_changed(
+    terminal: &vte::Terminal,
+    f: impl Fn(&vte::Terminal) + Clone + 'static,
+) -> [glib::SignalHandlerId; 2] {
+    [TERMPROP_CONTAINER_NAME, TERMPROP_CONTAINER_RUNTIME].map(|prop| {
+        let f = f.clone();
+        terminal.connect_termprop_changed(Some(prop), move |terminal, _| f(terminal))
+    })
 }
 
 /// Collapses a directory URI for display, replacing `$HOME` with `~`
