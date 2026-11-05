@@ -35,6 +35,7 @@
 //! `org.gnome.Ptyxis.Devel` to avoid talking to an installed instance.
 
 pub mod app;
+pub mod choices;
 pub mod cli;
 pub mod config;
 pub mod find_bar;

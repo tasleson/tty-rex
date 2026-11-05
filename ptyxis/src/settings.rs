@@ -39,14 +39,19 @@ pub mod key {
     pub const DEFAULT_COLUMNS: &str = "default-columns";
     pub const DEFAULT_PROFILE_UUID: &str = "default-profile-uuid";
     pub const DEFAULT_ROWS: &str = "default-rows";
+    pub const DISABLE_DYNAMIC_TITLE: &str = "disable-dynamic-title";
+    pub const ENABLE_A11Y: &str = "enable-a11y";
     pub const FONT_NAME: &str = "font-name";
     pub const IGNORE_OSC_TITLE: &str = "ignore-osc-title";
     pub const INTERFACE_STYLE: &str = "interface-style";
     pub const NEW_TAB_POSITION: &str = "new-tab-position";
     pub const PROFILE_UUIDS: &str = "profile-uuids";
+    pub const RESTORE_SESSION: &str = "restore-session";
     pub const RESTORE_WINDOW_SIZE: &str = "restore-window-size";
+    pub const SCROLLBAR_POLICY: &str = "scrollbar-policy";
     pub const TEXT_BLINK_MODE: &str = "text-blink-mode";
     pub const USE_SYSTEM_FONT: &str = "use-system-font";
+    pub const VISUAL_BELL: &str = "visual-bell";
     pub const WINDOW_SIZE: &str = "window-size";
 
     /// All keys, for validation against the schema template.
@@ -57,14 +62,19 @@ pub mod key {
         DEFAULT_COLUMNS,
         DEFAULT_PROFILE_UUID,
         DEFAULT_ROWS,
+        DISABLE_DYNAMIC_TITLE,
+        ENABLE_A11Y,
         FONT_NAME,
         IGNORE_OSC_TITLE,
         INTERFACE_STYLE,
         NEW_TAB_POSITION,
         PROFILE_UUIDS,
+        RESTORE_SESSION,
         RESTORE_WINDOW_SIZE,
+        SCROLLBAR_POLICY,
         TEXT_BLINK_MODE,
         USE_SYSTEM_FONT,
+        VISUAL_BELL,
         WINDOW_SIZE,
     ];
 }
@@ -267,6 +277,46 @@ impl From<InterfaceStyle> for adw::ColorScheme {
     }
 }
 
+nick_enum! {
+    /// What the Backspace and Delete keys send (`EraseBinding`).
+    EraseBinding: "EraseBinding", default Auto {
+        Auto => "auto",
+        AsciiBackspace => "ascii-backspace",
+        AsciiDelete => "ascii-delete",
+        DeleteSequence => "delete-sequence",
+        Tty => "tty",
+    }
+}
+
+impl From<EraseBinding> for vte::EraseBinding {
+    fn from(value: EraseBinding) -> Self {
+        match value {
+            EraseBinding::Auto => vte::EraseBinding::Auto,
+            EraseBinding::AsciiBackspace => vte::EraseBinding::AsciiBackspace,
+            EraseBinding::AsciiDelete => vte::EraseBinding::AsciiDelete,
+            EraseBinding::DeleteSequence => vte::EraseBinding::DeleteSequence,
+            EraseBinding::Tty => vte::EraseBinding::Tty,
+        }
+    }
+}
+
+nick_enum! {
+    CjkAmbiguousWidth: "CjkAmbiguousWidth", default Narrow {
+        Narrow => "narrow",
+        Wide => "wide",
+    }
+}
+
+impl CjkAmbiguousWidth {
+    /// The value `vte_terminal_set_cjk_ambiguous_width()` expects.
+    pub fn columns(self) -> i32 {
+        match self {
+            Self::Narrow => 1,
+            Self::Wide => 2,
+        }
+    }
+}
+
 /// Picks the font to use, following `ptyxis_settings_dup_font_desc()`: the
 /// system font wins when requested or when no custom font is configured.
 pub fn effective_font_name<'a>(
@@ -434,11 +484,29 @@ pub fn open(
             key: (*key).to_owned(),
         });
     }
-    Ok(gio::Settings::new_full(
-        &schema,
-        None::<&gio::SettingsBackend>,
-        path,
-    ))
+    Ok(gio::Settings::new_full(&schema, backend().as_ref(), path))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_BACKEND: std::cell::RefCell<Option<gio::SettingsBackend>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The backend settings are opened with: the default one, except in
+/// tests that opted into an in-memory backend.
+fn backend() -> Option<gio::SettingsBackend> {
+    #[cfg(test)]
+    return TEST_BACKEND.with_borrow(Clone::clone);
+    #[cfg(not(test))]
+    None
+}
+
+/// Makes settings opened on this test thread use a fresh in-memory
+/// backend, so tests can write without touching the user's dconf.
+#[cfg(test)]
+pub(crate) fn use_memory_backend() {
+    TEST_BACKEND.with_borrow_mut(|backend| *backend = Some(gio::memory_settings_backend_new()));
 }
 
 /// Helpers for validating Rust constants against the schema template.
@@ -473,7 +541,7 @@ pub(crate) mod schema_template {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Looks up a schema that must exist whenever `build.rs` compiled one;
@@ -534,6 +602,8 @@ mod tests {
         check_enum!(PreserveDirectory);
         check_enum!(NewTabPosition);
         check_enum!(InterfaceStyle);
+        check_enum!(EraseBinding);
+        check_enum!(CjkAmbiguousWidth);
     }
 
     #[test]

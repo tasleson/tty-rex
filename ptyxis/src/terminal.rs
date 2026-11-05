@@ -79,6 +79,9 @@ pub fn apply_profile(terminal: &vte::Terminal, profile: &Profile) {
     terminal.set_scroll_on_keystroke(profile.scroll_on_keystroke());
     terminal.set_cell_height_scale(profile.cell_height_scale());
     terminal.set_cell_width_scale(profile.cell_width_scale());
+    terminal.set_backspace_binding(profile.backspace_binding().into());
+    terminal.set_delete_binding(profile.delete_binding().into());
+    terminal.set_cjk_ambiguous_width(profile.cjk_ambiguous_width().columns());
 }
 
 /// Applies a palette face, as `ptyxis_terminal_update_colors()` does.
