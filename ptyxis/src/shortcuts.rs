@@ -39,6 +39,7 @@ pub mod key {
     pub const NEW_TAB: &str = "new-tab";
     pub const NEW_WINDOW: &str = "new-window";
     pub const PASTE_CLIPBOARD: &str = "paste-clipboard";
+    pub const PREFERENCES: &str = "preferences";
     pub const SEARCH: &str = "search";
     pub const ZOOM_IN: &str = "zoom-in";
     pub const ZOOM_ONE: &str = "zoom-one";
@@ -54,6 +55,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     (key::NEW_TAB, "win.new-tab"),
     (key::NEW_WINDOW, "win.new-window"),
     (key::PASTE_CLIPBOARD, "win.paste-clipboard"),
+    (key::PREFERENCES, "win.preferences"),
     (key::SEARCH, "win.search"),
     (key::ZOOM_IN, "win.zoom-in"),
     (key::ZOOM_ONE, "win.zoom-one"),
@@ -137,7 +139,8 @@ mod tests {
     use crate::settings::schema_template;
     use crate::window::{
         CloseTabAction, CopyAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
-        PreviousTabAction, SearchAction, ZoomInAction, ZoomOneAction, ZoomOutAction,
+        PreferencesAction, PreviousTabAction, SearchAction, ZoomInAction, ZoomOneAction,
+        ZoomOutAction,
     };
     use relm4::actions::ActionName;
 
@@ -161,6 +164,7 @@ mod tests {
             (key::NEW_TAB, NewTabAction::action_name()),
             (key::NEW_WINDOW, NewWindowAction::action_name()),
             (key::PASTE_CLIPBOARD, PasteAction::action_name()),
+            (key::PREFERENCES, PreferencesAction::action_name()),
             (key::SEARCH, SearchAction::action_name()),
             (key::ZOOM_IN, ZoomInAction::action_name()),
             (key::ZOOM_ONE, ZoomOneAction::action_name()),

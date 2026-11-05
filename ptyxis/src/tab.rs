@@ -44,6 +44,16 @@ const QUICK_EXIT_THRESHOLD: Duration = Duration::from_millis(500);
 
 const DEFAULT_TITLE: &str = "Terminal";
 const RESTART_LABEL: &str = "_Restart";
+const EDIT_PROFILE_LABEL: &str = "Edit Profile";
+/// Application action opening the profile editor (`app.edit-profile`).
+pub const EDIT_PROFILE_ACTION: &str = "app.edit-profile";
+
+/// What the banner button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BannerAction {
+    Restart,
+    EditProfile,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabState {
@@ -157,6 +167,7 @@ pub struct TabInit {
 #[derive(Debug)]
 pub enum TabInput {
     Respawn,
+    BannerClicked,
     Spawned(Result<glib::Pid, SpawnError>),
     Exited(ChildExit),
     UpdateTitle,
@@ -186,6 +197,7 @@ pub struct Tab {
     has_pressed_key: Rc<Cell<bool>>,
     terminal: vte::Terminal,
     banner: adw::Banner,
+    banner_action: BannerAction,
     /// Handlers on objects shared with other tabs, disconnected on shutdown.
     shared_handlers: Vec<(glib::Object, glib::SignalHandlerId)>,
 }
@@ -217,9 +229,13 @@ impl Tab {
         }
     }
 
-    fn show_banner(&self, title: &str) {
+    fn show_banner(&mut self, title: &str, action: BannerAction) {
         self.banner.set_title(title);
-        self.banner.set_button_label(Some(RESTART_LABEL));
+        self.banner.set_button_label(Some(match action {
+            BannerAction::Restart => RESTART_LABEL,
+            BannerAction::EditProfile => EDIT_PROFILE_LABEL,
+        }));
+        self.banner_action = action;
         self.banner.set_visible(true);
     }
 
@@ -271,7 +287,7 @@ impl Tab {
                     tab_view.close_page(&page);
                 }
             }
-            ExitOutcome::ShowBanner(title) => self.show_banner(&title),
+            ExitOutcome::ShowBanner(title) => self.show_banner(&title, BannerAction::Restart),
         }
     }
 
@@ -311,7 +327,7 @@ impl Component for Tab {
         root.append(&scrolled_window);
 
         let input = sender.input_sender().clone();
-        banner.connect_button_clicked(move |_| input.emit(TabInput::Respawn));
+        banner.connect_button_clicked(move |_| input.emit(TabInput::BannerClicked));
 
         let input = sender.input_sender().clone();
         terminal::connect_window_title_changed(&terminal, move |_| {
@@ -379,6 +395,7 @@ impl Component for Tab {
             has_pressed_key,
             terminal,
             banner,
+            banner_action: BannerAction::Restart,
             shared_handlers,
         };
         model.respawn(&sender);
@@ -388,6 +405,17 @@ impl Component for Tab {
 
     fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         match message {
+            TabInput::BannerClicked => match self.banner_action {
+                BannerAction::Restart => sender.input(TabInput::Respawn),
+                // As in ptyxis_tab_spawn_cb(), a failed spawn offers to fix
+                // the profile instead of retrying the same command.
+                BannerAction::EditProfile => {
+                    let uuid = self.profile.uuid().to_variant();
+                    if let Err(e) = root.activate_action(EDIT_PROFILE_ACTION, Some(&uuid)) {
+                        glib::g_warning!("Ptyxis", "Cannot open the profile editor: {e}");
+                    }
+                }
+            },
             TabInput::Respawn => {
                 if matches!(self.state, TabState::Exited | TabState::Failed) {
                     self.respawn(&sender);
@@ -400,7 +428,7 @@ impl Component for Tab {
             TabInput::Spawned(Err(e)) => {
                 self.state = TabState::Failed;
                 self.terminal.feed(format!("{e}\r\n").as_bytes());
-                self.show_banner("Failed to launch terminal");
+                self.show_banner("Failed to launch terminal", BannerAction::EditProfile);
             }
             TabInput::Exited(exit) => self.handle_exit(exit, root, &sender),
             TabInput::UpdateTitle => {}

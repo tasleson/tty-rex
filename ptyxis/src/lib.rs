@@ -41,6 +41,7 @@ pub mod config;
 pub mod find_bar;
 pub mod palette;
 pub mod palette_preview;
+pub mod preferences;
 pub mod profile;
 pub mod settings;
 pub mod shortcuts;

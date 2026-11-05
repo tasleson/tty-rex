@@ -35,6 +35,7 @@ pub mod option {
     pub const EXECUTE: &str = "execute";
     pub const IMPORT_PALETTE: &str = "import-palette";
     pub const NEW_WINDOW: &str = "new-window";
+    pub const PREFERENCES: &str = "preferences";
     pub const STANDALONE: &str = "standalone";
     pub const TAB: &str = "tab";
     pub const TAB_WITH_PROFILE: &str = "tab-with-profile";
@@ -51,6 +52,13 @@ struct OptionSpec {
 }
 
 const OPTIONS: &[OptionSpec] = &[
+    OptionSpec {
+        long: option::PREFERENCES,
+        short: None,
+        arg: glib::OptionArg::None,
+        description: "Show the application preferences",
+        arg_description: None,
+    },
     OptionSpec {
         long: option::WORKING_DIRECTORY,
         short: Some(b'd'),
@@ -116,6 +124,9 @@ const SUMMARY: &str = "Examples:
 
   Run Separate Instance
     ptyxis -s
+
+  Open Preferences
+    ptyxis --preferences
 
   Run Custom Command in New Window
     ptyxis -x \"bash -c 'sleep 3'\"
@@ -212,6 +223,7 @@ pub fn preprocess_args(args: Vec<String>) -> EarlyArgs {
 /// Options relevant to the port, extracted from the options dictionary.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandLineOptions {
+    pub preferences: bool,
     pub tab: bool,
     pub new_window: bool,
     pub tab_with_profile: Option<String>,
@@ -224,6 +236,7 @@ impl CommandLineOptions {
     pub fn from_dict(dict: &glib::VariantDict) -> Self {
         let string = |name| dict.lookup::<String>(name).ok().flatten();
         Self {
+            preferences: dict.contains(option::PREFERENCES),
             tab: dict.contains(option::TAB),
             new_window: dict.contains(option::NEW_WINDOW),
             tab_with_profile: string(option::TAB_WITH_PROFILE),
@@ -256,6 +269,8 @@ pub enum WindowTarget {
 /// What a command line asks the application to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandLineAction {
+    /// Show the preferences window (takes precedence like in C).
+    Preferences,
     /// Present an existing window or open the default one.
     Activate { title: Option<String> },
     OpenTab {
@@ -312,6 +327,10 @@ pub fn plan(
     };
     let title = options.title.clone();
     let profile_uuid = options.tab_with_profile.clone();
+
+    if options.preferences {
+        return Ok(CommandLineAction::Preferences);
+    }
 
     if let Some(command) = &options.execute {
         let argv = glib::shell_parse_argv(command.as_str())
@@ -466,6 +485,14 @@ mod tests {
 
         let cases = [
             (opts(), CommandLineAction::Activate { title: None }),
+            (
+                CommandLineOptions {
+                    preferences: true,
+                    tab: true,
+                    ..opts()
+                },
+                CommandLineAction::Preferences,
+            ),
             (
                 CommandLineOptions {
                     title: Some("Logs".into()),

@@ -67,6 +67,7 @@ relm4::new_stateless_action!(pub ZoomInAction, WindowActions, "zoom-in");
 relm4::new_stateless_action!(pub ZoomOutAction, WindowActions, "zoom-out");
 relm4::new_stateless_action!(pub ZoomOneAction, WindowActions, "zoom-one");
 relm4::new_stateless_action!(pub SearchAction, WindowActions, "search");
+relm4::new_stateless_action!(pub PreferencesAction, WindowActions, "preferences");
 
 pub struct WindowInit {
     pub app: Rc<App>,
@@ -92,6 +93,7 @@ pub enum WindowInput {
     ZoomReset,
     ShowFind,
     FindDismissed,
+    ShowPreferences,
     SelectedPageChanged,
     PageDetached {
         child: gtk::Widget,
@@ -262,6 +264,11 @@ fn build_primary_menu() -> gio::Menu {
     section.append_item(&RelmAction::<NewWindowAction>::to_menu_item("New _Window"));
     section.append_item(&RelmAction::<CloseTabAction>::to_menu_item("_Close Tab"));
     menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    section.append_item(&RelmAction::<PreferencesAction>::to_menu_item(
+        "_Preferences",
+    ));
+    menu.append_section(None, &section);
     menu
 }
 
@@ -378,6 +385,7 @@ impl Component for Window {
         add_action::<ZoomOutAction>(&window, &sender, || WindowInput::ZoomOut);
         add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset);
         add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
+        add_action::<PreferencesAction>(&window, &sender, || WindowInput::ShowPreferences);
 
         let shortcuts = Shortcuts::new()
             .inspect(|shortcuts| window.add_controller(shortcuts.controller().clone()))
@@ -469,6 +477,9 @@ impl Component for Window {
                     self.find_bar_revealer.set_reveal_child(true);
                     self.find_bar.emit(FindBarInput::Focus);
                 }
+            }
+            WindowInput::ShowPreferences => {
+                self.app.show_preferences(Some(self.window.upcast_ref()));
             }
             WindowInput::FindDismissed => {
                 self.find_bar_revealer.set_reveal_child(false);

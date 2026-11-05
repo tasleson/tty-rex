@@ -32,11 +32,12 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use relm4::actions::RelmAction;
+use relm4::actions::{ActionName, RelmAction};
 use relm4::prelude::*;
 
 use crate::cli::{self, CommandLineAction, CommandLineOptions, WindowTarget};
 use crate::config;
+use crate::preferences::{Preferences, PreferencesInit, PreferencesInput};
 use crate::profile::{Profile, Profiles};
 use crate::settings::{self, AppSettings, SettingsError};
 use crate::spawn::{HostSpawner, Spawner};
@@ -108,7 +109,13 @@ pub struct App {
     /// `--title` given without other options, applied when activation
     /// creates a window (`next_title_prefix` in the C code).
     next_title_prefix: RefCell<Option<String>>,
+    /// The single preferences window, while open.
+    preferences: RefCell<Option<Controller<Preferences>>>,
 }
+
+relm4::new_action_group!(AppActions, "app");
+relm4::new_stateless_action!(PreferencesAction, AppActions, "preferences");
+relm4::new_stateful_action!(EditProfileAction, AppActions, "edit-profile", String, ());
 
 impl App {
     fn new(application: &adw::Application) -> Result<Rc<Self>, SettingsError> {
@@ -123,6 +130,7 @@ impl App {
             windows: RefCell::default(),
             tabs: RefCell::default(),
             next_title_prefix: RefCell::default(),
+            preferences: RefCell::default(),
         });
 
         let style_manager = adw::StyleManager::default();
@@ -158,10 +166,33 @@ impl App {
                         app.windows
                             .borrow_mut()
                             .retain(|c| c.widget().upcast_ref::<gtk::Window>() != &window);
+                        let mut preferences = app.preferences.borrow_mut();
+                        if preferences
+                            .as_ref()
+                            .is_some_and(|c| c.widget().upcast_ref::<gtk::Window>() == &window)
+                        {
+                            *preferences = None;
+                        }
                     }
                 });
             }
         });
+
+        let weak = Rc::downgrade(&app);
+        let preferences = RelmAction::<PreferencesAction>::new_stateless(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.show_preferences(None);
+            }
+        });
+        application.add_action(preferences.gio_action());
+        let weak = Rc::downgrade(&app);
+        let edit_profile =
+            RelmAction::<EditProfileAction>::new_with_target_value(move |_, uuid| {
+                if let Some(app) = weak.upgrade() {
+                    app.edit_profile(&uuid);
+                }
+            });
+        application.add_action(edit_profile.gio_action());
 
         Ok(app)
     }
@@ -242,6 +273,40 @@ impl App {
         Some(WindowRef::new(controller))
     }
 
+    /// Presents the preferences window, creating it if needed
+    /// (`ptyxis_preferences_window_get_default()`).
+    pub fn show_preferences(&self, transient_for: Option<&gtk::Window>) -> gtk::Window {
+        let mut preferences = self.preferences.borrow_mut();
+        let controller = preferences.get_or_insert_with(|| {
+            let controller = Preferences::builder()
+                .launch(PreferencesInit {
+                    settings: self.settings.clone(),
+                    profiles: self.profiles.clone(),
+                })
+                .detach();
+            // Like the C window it gets its own window group so it stacks
+            // independently of terminal windows, and keeps the application
+            // running on its own (e.g. `ptyxis --preferences`).
+            gtk::WindowGroup::new().add_window(controller.widget());
+            self.application.add_window(controller.widget());
+            controller
+        });
+        let window: gtk::Window = controller.widget().clone().upcast();
+        if window.transient_for().is_none() {
+            window.set_transient_for(transient_for);
+        }
+        window.present();
+        window
+    }
+
+    /// Opens the editor for a profile in the preferences window.
+    pub fn edit_profile(&self, uuid: &str) {
+        self.show_preferences(None);
+        if let Some(preferences) = self.preferences.borrow().as_ref() {
+            preferences.emit(PreferencesInput::EditProfile(uuid.to_owned()));
+        }
+    }
+
     /// Opens a new window with a single tab.
     pub fn open_window_with_tab(self: &Rc<Self>, request: TabRequest) -> WindowRef {
         let window = self.new_window();
@@ -274,6 +339,11 @@ impl App {
         };
 
         match action {
+            CommandLineAction::Preferences => {
+                // GApplication action names carry no "app." prefix.
+                self.application
+                    .activate_action(<PreferencesAction as ActionName>::NAME, None);
+            }
             CommandLineAction::Activate { title } => {
                 *self.next_title_prefix.borrow_mut() = title;
                 self.application.activate();
