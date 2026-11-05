@@ -35,6 +35,7 @@ use gtk::{gio, glib};
 use relm4::actions::RelmAction;
 use relm4::prelude::*;
 
+use crate::cli::{self, CommandLineAction, CommandLineOptions, WindowTarget};
 use crate::config;
 use crate::profile::{Profile, Profiles};
 use crate::settings::{self, AppSettings, SettingsError};
@@ -101,6 +102,9 @@ pub struct App {
     menu_profiles: RefCell<Vec<Profile>>,
     windows: RefCell<Vec<Controller<Window>>>,
     tabs: RefCell<HashMap<gtk::Widget, TabHandle>>,
+    /// `--title` given without other options, applied when activation
+    /// creates a window (`next_title_prefix` in the C code).
+    next_title_prefix: RefCell<Option<String>>,
 }
 
 impl App {
@@ -115,6 +119,7 @@ impl App {
             menu_profiles: RefCell::default(),
             windows: RefCell::default(),
             tabs: RefCell::default(),
+            next_title_prefix: RefCell::default(),
         });
 
         let style_manager = adw::StyleManager::default();
@@ -244,11 +249,56 @@ impl App {
     fn activate(self: &Rc<Self>) {
         match self.current_window() {
             Some(window) => window.window.present(),
-            None => self
-                .open_window_with_tab(TabRequest::default())
-                .window
-                .present(),
+            None => {
+                let request = TabRequest {
+                    title_prefix: self.next_title_prefix.take(),
+                    ..Default::default()
+                };
+                self.open_window_with_tab(request).window.present();
+            }
         }
+    }
+
+    fn command_line(self: &Rc<Self>, cmdline: &gio::ApplicationCommandLine) -> glib::ExitCode {
+        let options = CommandLineOptions::from_dict(&cmdline.options_dict());
+        let caller_cwd = cmdline.cwd();
+        let action = match cli::plan(&options, caller_cwd.as_deref(), &glib::home_dir()) {
+            Ok(action) => action,
+            Err(e) => {
+                cmdline.printerr_literal(&format!("{e}\n"));
+                return glib::ExitCode::FAILURE;
+            }
+        };
+
+        match action {
+            CommandLineAction::Activate { title } => {
+                *self.next_title_prefix.borrow_mut() = title;
+                self.application.activate();
+            }
+            CommandLineAction::OpenTab {
+                target,
+                profile_uuid,
+                command,
+                cwd_uri,
+                title,
+            } => {
+                let request = TabRequest {
+                    profile_uuid,
+                    command,
+                    initial_cwd_uri: cwd_uri,
+                    title_prefix: title,
+                    ..Default::default()
+                };
+                let window = match target {
+                    WindowTarget::Current => self.current_window(),
+                    WindowTarget::New => None,
+                };
+                let window = window.unwrap_or_else(|| self.new_window());
+                window.sender.emit(WindowInput::AddTab(request));
+                window.window.present();
+            }
+        }
+        glib::ExitCode::SUCCESS
     }
 }
 
@@ -277,14 +327,22 @@ fn rebuild_profile_menu(app: &Weak<App>) {
     *app.menu_profiles.borrow_mut() = profiles;
 }
 
-/// Runs the application and returns its exit code.
+/// Runs the application with the process arguments and returns its exit code.
 pub fn run() -> glib::ExitCode {
     glib::set_prgname(Some("ptyxis"));
     glib::set_application_name(config::APP_NAME);
 
+    let early = cli::preprocess_args(std::env::args().collect());
+    let mut flags = gio::ApplicationFlags::HANDLES_COMMAND_LINE;
+    if early.standalone {
+        flags |= gio::ApplicationFlags::NON_UNIQUE | gio::ApplicationFlags::CAN_OVERRIDE_APP_ID;
+    }
+
     let application = adw::Application::builder()
         .application_id(config::APP_ID)
+        .flags(flags)
         .build();
+    cli::register_options(&application);
     // Registers the application with relm4 (for `relm4::main_application()`);
     // we never call `RelmApp::run()`, see the module docs.
     let _ = relm4::RelmApp::<()>::from_app(application.clone());
@@ -315,8 +373,18 @@ pub fn run() -> glib::ExitCode {
             }
         }
     });
+    application.connect_command_line({
+        let state = Rc::clone(&state);
+        move |_, cmdline| {
+            let app = state.borrow().clone();
+            match app {
+                Some(app) => app.command_line(cmdline),
+                None => glib::ExitCode::FAILURE,
+            }
+        }
+    });
 
-    let code = application.run();
+    let code = application.run_with_args(&early.args);
     if failed.get() {
         glib::ExitCode::FAILURE
     } else {
