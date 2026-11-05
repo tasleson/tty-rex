@@ -32,10 +32,14 @@ use crate::settings::{self, SettingsError};
 
 /// Keys of the `org.gnome.Ptyxis.Shortcuts` schema used by the port.
 pub mod key {
+    pub const CLOSE_OTHER_TABS: &str = "close-other-tabs";
     pub const CLOSE_TAB: &str = "close-tab";
     pub const COPY_CLIPBOARD: &str = "copy-clipboard";
+    pub const DETACH_TAB: &str = "detach-tab";
     pub const MOVE_NEXT_TAB: &str = "move-next-tab";
     pub const MOVE_PREVIOUS_TAB: &str = "move-previous-tab";
+    pub const MOVE_TAB_LEFT: &str = "move-tab-left";
+    pub const MOVE_TAB_RIGHT: &str = "move-tab-right";
     pub const NEW_TAB: &str = "new-tab";
     pub const NEW_WINDOW: &str = "new-window";
     pub const PASTE_CLIPBOARD: &str = "paste-clipboard";
@@ -50,10 +54,14 @@ pub mod key {
 
 /// Shortcut setting key and the detailed window action it activates.
 pub const BINDINGS: &[(&str, &str)] = &[
+    (key::CLOSE_OTHER_TABS, "win.close-other-tabs"),
     (key::CLOSE_TAB, "win.close-tab"),
     (key::COPY_CLIPBOARD, "win.copy-clipboard"),
+    (key::DETACH_TAB, "win.detach-tab"),
     (key::MOVE_NEXT_TAB, "win.next-tab"),
     (key::MOVE_PREVIOUS_TAB, "win.previous-tab"),
+    (key::MOVE_TAB_LEFT, "win.move-tab-left"),
+    (key::MOVE_TAB_RIGHT, "win.move-tab-right"),
     (key::NEW_TAB, "win.new-tab"),
     (key::NEW_WINDOW, "win.new-window"),
     (key::PASTE_CLIPBOARD, "win.paste-clipboard"),
@@ -379,7 +387,8 @@ mod tests {
     use super::*;
     use crate::settings::schema_template;
     use crate::window::{
-        CloseTabAction, CopyAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
+        CloseOtherTabsAction, CloseTabAction, CopyAction, DetachTabAction, MoveTabLeftAction,
+        MoveTabRightAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
         PreferencesAction, PreviousTabAction, SearchAction, SetTitleAction,
         ShowKeyboardShortcutsAction, ZoomInAction, ZoomOneAction, ZoomOutAction,
     };
@@ -398,10 +407,14 @@ mod tests {
     #[test]
     fn bindings_target_window_actions() {
         let expected = [
+            (key::CLOSE_OTHER_TABS, CloseOtherTabsAction::action_name()),
             (key::CLOSE_TAB, CloseTabAction::action_name()),
             (key::COPY_CLIPBOARD, CopyAction::action_name()),
+            (key::DETACH_TAB, DetachTabAction::action_name()),
             (key::MOVE_NEXT_TAB, NextTabAction::action_name()),
             (key::MOVE_PREVIOUS_TAB, PreviousTabAction::action_name()),
+            (key::MOVE_TAB_LEFT, MoveTabLeftAction::action_name()),
+            (key::MOVE_TAB_RIGHT, MoveTabRightAction::action_name()),
             (key::NEW_TAB, NewTabAction::action_name()),
             (key::NEW_WINDOW, NewWindowAction::action_name()),
             (key::PASTE_CLIPBOARD, PasteAction::action_name()),

@@ -39,6 +39,7 @@ use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
 use crate::settings::NewTabPosition;
 use crate::shortcuts::Shortcuts;
 use crate::terminal;
+use crate::title_dialog::SET_TITLE_LABEL;
 
 const DEFAULT_ICON_NAME: &str = "utilities-terminal-symbolic";
 const DEVEL_STYLE_CLASS: &str = "devel";
@@ -59,6 +60,12 @@ relm4::new_stateful_action!(
 );
 relm4::new_stateless_action!(pub NewWindowAction, WindowActions, "new-window");
 relm4::new_stateless_action!(pub CloseTabAction, WindowActions, "close-tab");
+relm4::new_stateless_action!(pub CloseOtherTabsAction, WindowActions, "close-other-tabs");
+relm4::new_stateless_action!(pub MoveTabLeftAction, WindowActions, "move-tab-left");
+relm4::new_stateless_action!(pub MoveTabRightAction, WindowActions, "move-tab-right");
+relm4::new_stateless_action!(pub DetachTabAction, WindowActions, "detach-tab");
+relm4::new_stateless_action!(pub PinTabAction, WindowActions, "pin-tab");
+relm4::new_stateless_action!(pub UnpinTabAction, WindowActions, "unpin-tab");
 relm4::new_stateless_action!(pub NextTabAction, WindowActions, "next-tab");
 relm4::new_stateless_action!(pub PreviousTabAction, WindowActions, "previous-tab");
 relm4::new_stateless_action!(pub CopyAction, WindowActions, "copy-clipboard");
@@ -90,6 +97,11 @@ pub enum WindowInput {
     },
     NewWindow,
     CloseTab,
+    CloseOtherTabs,
+    MoveTabLeft,
+    MoveTabRight,
+    DetachTab,
+    SetTabPinned(bool),
     NextTab,
     PreviousTab,
     Copy,
@@ -122,6 +134,9 @@ pub struct Window {
     _shortcuts: Option<Shortcuts>,
     /// Disabled without a selection so the shortcut reaches the terminal.
     copy_action: gio::SimpleAction,
+    /// Follows the selected page's `pinned` property so the tab menu only
+    /// shows the applicable one.
+    _pinned_signals: glib::SignalGroup,
     /// Handlers on the selected tab's terminal, dropped on tab switch.
     terminal_handlers: Option<(vte::Terminal, Vec<glib::SignalHandlerId>)>,
 }
@@ -151,6 +166,15 @@ impl Window {
 
     fn selected_child(&self) -> Option<gtk::Widget> {
         self.tab_view.selected_page().map(|page| page.child())
+    }
+
+    /// Moves the selected tab one step and keeps focus in it, like
+    /// `ptyxis_window_move_left_action()`.
+    fn move_selected_tab(&self, reorder: fn(&adw::TabView, &adw::TabPage) -> bool) {
+        if let Some(page) = self.tab_view.selected_page() {
+            reorder(&self.tab_view, &page);
+            self.send_to_active_tab(crate::tab::TabInput::Focus);
+        }
     }
 
     fn send_to_active_tab(&self, message: crate::tab::TabInput) {
@@ -321,6 +345,73 @@ fn release_tabs(app: &App, tab_view: &adw::TabView) {
     }
 }
 
+/// Keeps `win.pin-tab` / `win.unpin-tab` in line with the selected page
+/// (`ptyxis_window_selected_page_notify_pinned_cb()`).
+fn track_pinned(
+    tab_view: &adw::TabView,
+    pin: gio::SimpleAction,
+    unpin: gio::SimpleAction,
+) -> glib::SignalGroup {
+    let update = move |page: Option<&adw::TabPage>| {
+        let pinned = page.map(adw::TabPage::is_pinned);
+        pin.set_enabled(pinned == Some(false));
+        unpin.set_enabled(pinned == Some(true));
+    };
+    update(None);
+    let signals = glib::SignalGroup::new::<adw::TabPage>();
+    let on_notify = update.clone();
+    signals.connect_notify_local(Some("pinned"), move |page, _| {
+        on_notify(page.downcast_ref());
+    });
+    let on_bind = update.clone();
+    signals.connect_bind_local(move |_, page| on_bind(page.downcast_ref()));
+    signals.connect_unbind_local(move |_| update(None));
+    tab_view
+        .bind_property("selected-page", &signals, "target")
+        .sync_create()
+        .build();
+    signals
+}
+
+const HIDDEN_WHEN_ATTRIBUTE: &str = "hidden-when";
+const HIDDEN_WHEN_ACTION_DISABLED: &str = "action-disabled";
+
+/// The tab context menu of `src/ptyxis-window.ui`.
+fn build_tab_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    let section = gio::Menu::new();
+    section.append_item(&RelmAction::<MoveTabLeftAction>::to_menu_item("Move _Left"));
+    section.append_item(&RelmAction::<MoveTabRightAction>::to_menu_item(
+        "Move _Right",
+    ));
+    section.append_item(&RelmAction::<DetachTabAction>::to_menu_item(
+        "Move to New _Window",
+    ));
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    for item in [
+        RelmAction::<PinTabAction>::to_menu_item("_Pin Tab"),
+        RelmAction::<UnpinTabAction>::to_menu_item("Un_pin Tab"),
+    ] {
+        item.set_attribute_value(
+            HIDDEN_WHEN_ATTRIBUTE,
+            Some(&HIDDEN_WHEN_ACTION_DISABLED.to_variant()),
+        );
+        section.append_item(&item);
+    }
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    section.append_item(&RelmAction::<SetTitleAction>::to_menu_item(SET_TITLE_LABEL));
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    section.append_item(&RelmAction::<CloseOtherTabsAction>::to_menu_item(
+        "Close _Other Tabs",
+    ));
+    section.append_item(&RelmAction::<CloseTabAction>::to_menu_item("_Close Tab"));
+    menu.append_section(None, &section);
+    menu
+}
+
 /// Custom menu item id where the theme selector is placed.
 const INTERFACE_STYLE_ITEM: &str = "interface-style";
 
@@ -378,6 +469,14 @@ impl Component for Window {
         tab_view.set_vexpand(true);
         // Our own GSettings-driven shortcuts replace libadwaita's defaults.
         tab_view.set_shortcuts(adw::TabViewShortcuts::empty());
+        tab_view.set_menu_model(Some(&build_tab_menu()));
+        // The tab menu acts on the selected tab, so select the one it was
+        // opened for (`ptyxis_window_setup_menu_cb()`).
+        tab_view.connect_setup_menu(|tab_view, page| {
+            if let Some(page) = page {
+                tab_view.set_selected_page(page);
+            }
+        });
 
         let tab_bar = adw::TabBar::builder()
             .view(&tab_view)
@@ -451,6 +550,14 @@ impl Component for Window {
         window.add_action(new_tab_with_profile.gio_action());
         add_action::<NewWindowAction>(&window, &sender, || WindowInput::NewWindow);
         add_action::<CloseTabAction>(&window, &sender, || WindowInput::CloseTab);
+        add_action::<CloseOtherTabsAction>(&window, &sender, || WindowInput::CloseOtherTabs);
+        add_action::<MoveTabLeftAction>(&window, &sender, || WindowInput::MoveTabLeft);
+        add_action::<MoveTabRightAction>(&window, &sender, || WindowInput::MoveTabRight);
+        add_action::<DetachTabAction>(&window, &sender, || WindowInput::DetachTab);
+        let pin = add_action::<PinTabAction>(&window, &sender, || WindowInput::SetTabPinned(true));
+        let unpin =
+            add_action::<UnpinTabAction>(&window, &sender, || WindowInput::SetTabPinned(false));
+        let pinned_signals = track_pinned(&tab_view, pin, unpin);
         add_action::<NextTabAction>(&window, &sender, || WindowInput::NextTab);
         add_action::<PreviousTabAction>(&window, &sender, || WindowInput::PreviousTab);
         let copy_action = add_action::<CopyAction>(&window, &sender, || WindowInput::Copy);
@@ -516,6 +623,7 @@ impl Component for Window {
             find_bar_revealer,
             _shortcuts: shortcuts,
             copy_action,
+            _pinned_signals: pinned_signals,
             terminal_handlers: None,
         };
         ComponentParts { model, widgets: () }
@@ -538,6 +646,27 @@ impl Component for Window {
             WindowInput::CloseTab => {
                 if let Some(page) = self.tab_view.selected_page() {
                     self.tab_view.close_page(&page);
+                }
+            }
+            WindowInput::CloseOtherTabs => {
+                if let Some(page) = self.tab_view.selected_page() {
+                    self.tab_view.close_other_pages(&page);
+                }
+            }
+            WindowInput::MoveTabLeft => self.move_selected_tab(adw::TabView::reorder_backward),
+            WindowInput::MoveTabRight => self.move_selected_tab(adw::TabView::reorder_forward),
+            WindowInput::DetachTab => {
+                // A transfer keeps the tab registered with the App (see
+                // `PageDetached`), so the tab survives the move.
+                if let Some(page) = self.tab_view.selected_page() {
+                    let window = self.app.new_window();
+                    self.tab_view.transfer_page(&page, &window.tab_view, 0);
+                    window.window.present();
+                }
+            }
+            WindowInput::SetTabPinned(pinned) => {
+                if let Some(page) = self.tab_view.selected_page() {
+                    self.tab_view.set_page_pinned(&page, pinned);
                 }
             }
             WindowInput::NextTab => {
