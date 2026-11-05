@@ -89,7 +89,11 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
     let face = style.face;
     let window = format!("window.{css_class}");
     let contents = format!("{window} toolbarview.{WINDOW_CONTENTS_CLASS}");
-    let top_bar = format!("{contents} > revealer.top-bar > windowhandle");
+    // Colors go on the top-bar revealer itself, under libadwaita's devel
+    // stripes. Its window handle child is drawn at half opacity while the
+    // window is in the backdrop, so painting that instead would hide the
+    // stripes while focused and show them through a faded color otherwise.
+    let top_bar = format!("{contents} > revealer.top-bar");
     // Everything but dialogs sits in the tab overview (the C build's
     // `.window-contents`); `toolbarview.overview` is its own grid view.
     let overview = format!("{window} taboverview");
@@ -172,18 +176,13 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
         LeaderKind::Unknown | LeaderKind::Container => None,
     };
     match leader {
-        Some(scarf) => {
-            for selector in [top_bar.as_str(), &format!("{contents} headerbar")] {
-                rule(&mut css, selector, &scarf.foreground, &scarf.background);
-            }
-        }
+        // Header bars in a top bar are transparent, so this covers them.
+        Some(scarf) => rule(&mut css, &top_bar, &scarf.foreground, &scarf.background),
         // The highlight outranks the backdrop fade in the C rules, so the
         // fade only applies without one.
         None => rule(
             &mut css,
-            &format!(
-                "{window}:backdrop toolbarview.{WINDOW_CONTENTS_CLASS} > revealer.top-bar > windowhandle"
-            ),
+            &format!("{window}:backdrop toolbarview.{WINDOW_CONTENTS_CLASS} > revealer.top-bar"),
             &palette::mix(&face.background, &face.foreground, BACKDROP_FOREGROUND_MIX),
             &palette::mix(&face.background, &face.foreground, BACKDROP_BACKGROUND_MIX),
         ),
@@ -282,10 +281,12 @@ mod tests {
     use super::*;
 
     const CLASS: &str = "ptyxis-tab-1";
-    const TOP_BAR: &str =
-        "window.ptyxis-tab-1 toolbarview.window-contents > revealer.top-bar > windowhandle";
-    const HEADERBAR: &str = "window.ptyxis-tab-1 toolbarview.window-contents headerbar";
-    const BACKDROP: &str = "window.ptyxis-tab-1:backdrop toolbarview.window-contents > revealer.top-bar > windowhandle";
+    const TOP_BAR: &str = "window.ptyxis-tab-1 toolbarview.window-contents > revealer.top-bar";
+    const BACKDROP: &str =
+        "window.ptyxis-tab-1:backdrop toolbarview.window-contents > revealer.top-bar";
+    /// Nothing may paint the window handle: libadwaita fades it in the
+    /// backdrop, which would let the devel stripes show through.
+    const WINDOW_HANDLE: &str = "> windowhandle";
 
     fn face() -> Face {
         palette::lookup_or_default(palette::DEFAULT_PALETTE_ID)
@@ -330,7 +331,7 @@ mod tests {
             assert!(css.contains(&expected), "missing {expected:?} in\n{css}");
         }
         assert!(css.contains(BACKDROP), "{css}");
-        assert!(!css.contains(HEADERBAR), "{css}");
+        assert!(!css.contains(WINDOW_HANDLE), "{css}");
         assert!(css.contains("--accent-bg-color"), "{css}");
     }
 
@@ -448,18 +449,14 @@ mod tests {
                 },
             );
             let context = format!("{leader:?} enabled={enabled}");
+            assert!(!css.contains(WINDOW_HANDLE), "{context}: {css}");
             match scarf {
                 Some(scarf) => {
-                    for selector in [TOP_BAR, HEADERBAR] {
-                        let expected = rule_for(selector, &scarf.foreground, &scarf.background);
-                        assert!(css.contains(&expected), "{context}: {css}");
-                    }
+                    let expected = rule_for(TOP_BAR, &scarf.foreground, &scarf.background);
+                    assert!(css.contains(&expected), "{context}: {css}");
                     assert!(!css.contains(BACKDROP), "{context}: {css}");
                 }
-                None => {
-                    assert!(!css.contains(HEADERBAR), "{context}: {css}");
-                    assert!(css.contains(BACKDROP), "{context}: {css}");
-                }
+                None => assert!(css.contains(BACKDROP), "{context}: {css}"),
             }
         }
     }
