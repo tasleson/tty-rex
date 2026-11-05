@@ -37,7 +37,7 @@ use gtk::gdk;
 
 use crate::leader::LeaderKind;
 use crate::palette::{self, Face, Scarf};
-use crate::window::WINDOW_CONTENTS_CLASS;
+use crate::window::{VISUAL_BELL_CLASS, WINDOW_CONTENTS_CLASS};
 
 /// Prefix of the CSS class that marks the window showing a given tab.
 const CLASS_PREFIX: &str = "ptyxis-tab-";
@@ -82,7 +82,7 @@ fn rule(css: &mut String, selector: &str, color: &gdk::RGBA, background: &gdk::R
 /// The window CSS for the window carrying `css_class`, following
 /// `ptyxis_window_dressing_update()`. Selectors are adapted to the port's
 /// widget tree; rules for widgets the port does not have yet (tab overview,
-/// visual bell flash, size and hover-URI labels) are left out.
+/// size and hover-URI labels) are left out.
 pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
     let face = style.face;
     let window = format!("window.{css_class}");
@@ -152,6 +152,21 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
             &palette::mix(&face.background, &face.foreground, BACKDROP_BACKGROUND_MIX),
         ),
     }
+
+    // The bell flashes the area behind the header bar. As in C, the
+    // keyframes are named per appearance, so switching between light and
+    // dark defines new ones instead of redefining the running animation.
+    let keyframes = format!(
+        "visual-bell-{css_class}-{}",
+        if style.dark { "dark" } else { "light" }
+    );
+    let _ = writeln!(
+        css,
+        "{contents} box.{VISUAL_BELL_CLASS} headerbar {{ background-color: transparent; }}\n\
+         {contents} box.{VISUAL_BELL_CLASS} {{ animation: {keyframes} 0.3s ease-out; }}\n\
+         @keyframes {keyframes} {{ 50% {{ background-color: {}; color: {}; }} }}",
+        face.visual_bell.background, face.visual_bell.foreground
+    );
 
     if !style.use_system_accent {
         let accent_foreground = if style.dark {
@@ -281,6 +296,36 @@ mod tests {
         assert!(css.contains(BACKDROP), "{css}");
         assert!(!css.contains(HEADERBAR), "{css}");
         assert!(css.contains("--accent-bg-color"), "{css}");
+    }
+
+    #[test]
+    fn visual_bell_flash() {
+        let face = face();
+        for (dark, name) in [
+            (true, "visual-bell-ptyxis-tab-1-dark"),
+            (false, "visual-bell-ptyxis-tab-1-light"),
+        ] {
+            let css = dressing_css(
+                CLASS,
+                &DressingStyle {
+                    dark,
+                    ..style(&face)
+                },
+            );
+            let flash = format!(
+                "@keyframes {name} {{ 50% {{ background-color: {}; color: {}; }} }}",
+                face.visual_bell.background, face.visual_bell.foreground
+            );
+            for expected in [
+                format!(
+                    "window.ptyxis-tab-1 toolbarview.window-contents box.visual-bell {{ animation: {name} 0.3s ease-out; }}"
+                ),
+                flash,
+                "window.ptyxis-tab-1 toolbarview.window-contents box.visual-bell headerbar { background-color: transparent; }".to_owned(),
+            ] {
+                assert!(css.contains(&expected), "missing {expected:?} in\n{css}");
+            }
+        }
     }
 
     #[test]

@@ -46,6 +46,15 @@ const DEVEL_STYLE_CLASS: &str = "devel";
 /// Marks the window's main toolbar view, scoping window-dressing CSS so
 /// it skips dialogs (`window-contents` in `src/ptyxis-window.ui`).
 pub const WINDOW_CONTENTS_CLASS: &str = "window-contents";
+/// Wraps the header bar so the visual bell can flash it; `style.css`
+/// adjusts its padding while the tab bar shows.
+const VISUAL_BELL_AREA_CLASS: &str = "visual-bell-area";
+/// Added to the bell area for one flash (see `dressing`).
+pub const VISUAL_BELL_CLASS: &str = "visual-bell";
+/// Outlasts the flash animation so the next bell restarts it (the C
+/// build's 500 ms, synced with the 0.3 s animation).
+const VISUAL_BELL_DURATION: std::time::Duration = std::time::Duration::from_millis(500);
+const HAS_TAB_BAR_CLASS: &str = "has-tab-bar";
 const MIN_WIDTH: i32 = 360;
 const MIN_HEIGHT: i32 = 294;
 
@@ -118,6 +127,10 @@ pub enum WindowInput {
     ShowPreferences,
     ShowKeyboardShortcuts,
     SelectedPageChanged,
+    /// The selected tab's terminal rang the bell.
+    Bell,
+    /// The flash started with this serial is over.
+    VisualBellDone(u32),
     PageDetached {
         child: gtk::Widget,
         transferring: bool,
@@ -145,6 +158,11 @@ pub struct Window {
     /// CSS class of the selected tab, which lets that tab style the window
     /// (e.g. highlight it while running sudo or ssh).
     tab_css_class: Option<String>,
+    input: relm4::Sender<WindowInput>,
+    visual_bell: gtk::Box,
+    /// Identifies the latest flash, so an earlier flash ending does not cut
+    /// a later one short.
+    visual_bell_serial: u32,
 }
 
 /// Registers a parameterless action that forwards `message` to the window
@@ -236,6 +254,20 @@ impl Window {
         }
     }
 
+    /// Flashes the header bar (`ptyxis_window_visual_bell()`).
+    fn visual_bell(&mut self) {
+        if !self.app.settings().visual_bell() {
+            return;
+        }
+        self.visual_bell.add_css_class(VISUAL_BELL_CLASS);
+        self.visual_bell_serial = self.visual_bell_serial.wrapping_add(1);
+        let serial = self.visual_bell_serial;
+        let input = self.input.clone();
+        glib::timeout_add_local_once(VISUAL_BELL_DURATION, move || {
+            input.emit(WindowInput::VisualBellDone(serial))
+        });
+    }
+
     fn close_if_empty(&self) {
         if self.tab_view.n_pages() == 0 && !self.tab_view.is_transferring_page() {
             self.window.destroy();
@@ -291,7 +323,13 @@ impl Window {
         let selection_id = tab.terminal.connect_selection_changed(move |terminal| {
             copy_action.set_enabled(terminal.has_selection())
         });
-        self.terminal_handlers = Some((tab.terminal.clone(), vec![cwd_id, selection_id]));
+        // Like ptyxis_window_active_tab_bell_cb(), only the selected tab
+        // flashes the window.
+        let input = self.input.clone();
+        let bell_id = tab
+            .terminal
+            .connect_bell(move |_| input.emit(WindowInput::Bell));
+        self.terminal_handlers = Some((tab.terminal.clone(), vec![cwd_id, selection_id, bell_id]));
         tab.sender.emit(crate::tab::TabInput::Focus);
     }
 }
@@ -536,7 +574,10 @@ impl Component for Window {
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_css_class(WINDOW_CONTENTS_CLASS);
-        toolbar_view.add_top_bar(&header);
+        let visual_bell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        visual_bell.add_css_class(VISUAL_BELL_AREA_CLASS);
+        visual_bell.append(&header);
+        toolbar_view.add_top_bar(&visual_bell);
         toolbar_view.add_top_bar(&tab_bar);
         toolbar_view.set_content(Some(&content));
         window.set_content(Some(&toolbar_view));
@@ -608,6 +649,17 @@ impl Component for Window {
                 input.emit(WindowInput::TransferFinished);
             }
         });
+        // The tab bar hides itself while there is a single tab.
+        let weak_window = window.downgrade();
+        tab_view.connect_n_pages_notify(move |tab_view| {
+            if let Some(window) = weak_window.upgrade() {
+                if tab_view.n_pages() > 1 {
+                    window.add_css_class(HAS_TAB_BAR_CLASS);
+                } else {
+                    window.remove_css_class(HAS_TAB_BAR_CLASS);
+                }
+            }
+        });
         let weak_app = Rc::downgrade(&app);
         tab_view.connect_create_window(move |_| {
             let app = weak_app.upgrade()?;
@@ -640,6 +692,9 @@ impl Component for Window {
             _pinned_signals: pinned_signals,
             terminal_handlers: None,
             tab_css_class: None,
+            input: sender.input_sender().clone(),
+            visual_bell,
+            visual_bell_serial: 0,
         };
         ComponentParts { model, widgets: () }
     }
@@ -713,6 +768,12 @@ impl Component for Window {
                 self.send_to_active_tab(TabInput::Focus);
             }
             WindowInput::SelectedPageChanged => self.on_selected_page_changed(),
+            WindowInput::Bell => self.visual_bell(),
+            WindowInput::VisualBellDone(serial) => {
+                if serial == self.visual_bell_serial {
+                    self.visual_bell.remove_css_class(VISUAL_BELL_CLASS);
+                }
+            }
             WindowInput::PageDetached {
                 child,
                 transferring,

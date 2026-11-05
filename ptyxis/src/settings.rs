@@ -380,6 +380,10 @@ impl AppSettings {
         parse(self.settings.string(key).as_str())
     }
 
+    pub fn visual_bell(&self) -> bool {
+        self.settings.boolean(key::VISUAL_BELL)
+    }
+
     pub fn audible_bell(&self) -> bool {
         self.settings.boolean(key::AUDIBLE_BELL)
     }
