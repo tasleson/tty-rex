@@ -47,17 +47,17 @@ pub mod key {
 
 /// Shortcut setting key and the detailed window action it activates.
 pub const BINDINGS: &[(&str, &str)] = &[
-    (key::CLOSE_TAB, "window.close-tab"),
-    (key::COPY_CLIPBOARD, "window.copy-clipboard"),
-    (key::MOVE_NEXT_TAB, "window.next-tab"),
-    (key::MOVE_PREVIOUS_TAB, "window.previous-tab"),
-    (key::NEW_TAB, "window.new-tab"),
-    (key::NEW_WINDOW, "window.new-window"),
-    (key::PASTE_CLIPBOARD, "window.paste-clipboard"),
-    (key::SEARCH, "window.search"),
-    (key::ZOOM_IN, "window.zoom-in"),
-    (key::ZOOM_ONE, "window.zoom-one"),
-    (key::ZOOM_OUT, "window.zoom-out"),
+    (key::CLOSE_TAB, "win.close-tab"),
+    (key::COPY_CLIPBOARD, "win.copy-clipboard"),
+    (key::MOVE_NEXT_TAB, "win.next-tab"),
+    (key::MOVE_PREVIOUS_TAB, "win.previous-tab"),
+    (key::NEW_TAB, "win.new-tab"),
+    (key::NEW_WINDOW, "win.new-window"),
+    (key::PASTE_CLIPBOARD, "win.paste-clipboard"),
+    (key::SEARCH, "win.search"),
+    (key::ZOOM_IN, "win.zoom-in"),
+    (key::ZOOM_ONE, "win.zoom-one"),
+    (key::ZOOM_OUT, "win.zoom-out"),
 ];
 
 /// Returns the accelerator to install, or `None` when the user disabled

@@ -29,7 +29,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use relm4::actions::{ActionName, EmptyType, RelmAction, RelmActionGroup};
+use relm4::actions::{ActionName, EmptyType, RelmAction};
 use relm4::prelude::*;
 use vte::prelude::*;
 
@@ -45,7 +45,10 @@ const DEVEL_STYLE_CLASS: &str = "devel";
 const MIN_WIDTH: i32 = 360;
 const MIN_HEIGHT: i32 = 294;
 
-relm4::new_action_group!(pub WindowActions, "window");
+// Actions live in the window's own `win` action map, matching the C action
+// names and making them reachable over D-Bus (org.gtk.Actions on the
+// window's object path) like any GtkApplicationWindow action.
+relm4::new_action_group!(pub WindowActions, "win");
 relm4::new_stateless_action!(pub NewTabAction, WindowActions, "new-tab");
 relm4::new_stateful_action!(
     pub NewTabWithProfileAction,
@@ -107,23 +110,28 @@ pub struct Window {
     find_bar_revealer: gtk::Revealer,
     /// Kept alive so the controller follows settings changes.
     _shortcuts: Option<Shortcuts>,
-    cwd_handler: Option<(vte::Terminal, glib::SignalHandlerId)>,
+    /// Disabled without a selection so the shortcut reaches the terminal.
+    copy_action: gio::SimpleAction,
+    /// Handlers on the selected tab's terminal, dropped on tab switch.
+    terminal_handlers: Option<(vte::Terminal, Vec<glib::SignalHandlerId>)>,
 }
 
-/// Registers a parameterless action that forwards `message` to the window.
+/// Registers a parameterless action that forwards `message` to the window
+/// and returns it.
 fn add_action<A>(
-    group: &mut RelmActionGroup<WindowActions>,
+    window: &adw::ApplicationWindow,
     sender: &ComponentSender<Window>,
     message: fn() -> WindowInput,
-) where
+) -> gio::SimpleAction
+where
     A: ActionName<Group = WindowActions>,
     A::Target: EmptyType,
     A::State: EmptyType,
 {
     let input = sender.input_sender().clone();
-    group.add_action(RelmAction::<A>::new_stateless(move |_| {
-        input.emit(message())
-    }));
+    let action = RelmAction::<A>::new_stateless(move |_| input.emit(message()));
+    window.add_action(action.gio_action());
+    action.gio_action().clone()
 }
 
 impl Window {
@@ -198,9 +206,12 @@ impl Window {
         let page = self.tab_view.selected_page();
         self.title_bindings.set_source(page.as_ref());
 
-        if let Some((terminal, id)) = self.cwd_handler.take() {
-            terminal.disconnect(id);
+        if let Some((terminal, ids)) = self.terminal_handlers.take() {
+            for id in ids {
+                terminal.disconnect(id);
+            }
         }
+        self.copy_action.set_enabled(false);
         let tab = page.as_ref().and_then(|page| self.app.tab(&page.child()));
         self.find_bar.emit(FindBarInput::SetTerminal(
             tab.as_ref().map(|t| t.terminal.clone()),
@@ -225,8 +236,15 @@ impl Window {
             window_title.set_subtitle(&subtitle);
         };
         update_subtitle(&tab.terminal);
-        let id = terminal::connect_current_directory_uri_changed(&tab.terminal, update_subtitle);
-        self.cwd_handler = Some((tab.terminal.clone(), id));
+        let cwd_id =
+            terminal::connect_current_directory_uri_changed(&tab.terminal, update_subtitle);
+
+        let copy_action = self.copy_action.clone();
+        copy_action.set_enabled(tab.terminal.has_selection());
+        let selection_id = tab.terminal.connect_selection_changed(move |terminal| {
+            copy_action.set_enabled(terminal.has_selection())
+        });
+        self.terminal_handlers = Some((tab.terminal.clone(), vec![cwd_id, selection_id]));
         tab.sender.emit(crate::tab::TabInput::Focus);
     }
 }
@@ -338,29 +356,28 @@ impl Component for Window {
             .sync_create()
             .build();
 
-        let mut actions = RelmActionGroup::<WindowActions>::new();
-        add_action::<NewTabAction>(&mut actions, &sender, || WindowInput::NewTab {
+        add_action::<NewTabAction>(&window, &sender, || WindowInput::NewTab {
             profile_uuid: None,
         });
         let input = sender.input_sender().clone();
-        actions.add_action(
+        let new_tab_with_profile =
             RelmAction::<NewTabWithProfileAction>::new_with_target_value(move |_, uuid| {
                 input.emit(WindowInput::NewTab {
                     profile_uuid: Some(uuid),
                 })
-            }),
-        );
-        add_action::<NewWindowAction>(&mut actions, &sender, || WindowInput::NewWindow);
-        add_action::<CloseTabAction>(&mut actions, &sender, || WindowInput::CloseTab);
-        add_action::<NextTabAction>(&mut actions, &sender, || WindowInput::NextTab);
-        add_action::<PreviousTabAction>(&mut actions, &sender, || WindowInput::PreviousTab);
-        add_action::<CopyAction>(&mut actions, &sender, || WindowInput::Copy);
-        add_action::<PasteAction>(&mut actions, &sender, || WindowInput::Paste);
-        add_action::<ZoomInAction>(&mut actions, &sender, || WindowInput::ZoomIn);
-        add_action::<ZoomOutAction>(&mut actions, &sender, || WindowInput::ZoomOut);
-        add_action::<ZoomOneAction>(&mut actions, &sender, || WindowInput::ZoomReset);
-        add_action::<SearchAction>(&mut actions, &sender, || WindowInput::ShowFind);
-        actions.register_for_widget(&window);
+            });
+        window.add_action(new_tab_with_profile.gio_action());
+        add_action::<NewWindowAction>(&window, &sender, || WindowInput::NewWindow);
+        add_action::<CloseTabAction>(&window, &sender, || WindowInput::CloseTab);
+        add_action::<NextTabAction>(&window, &sender, || WindowInput::NextTab);
+        add_action::<PreviousTabAction>(&window, &sender, || WindowInput::PreviousTab);
+        let copy_action = add_action::<CopyAction>(&window, &sender, || WindowInput::Copy);
+        copy_action.set_enabled(false);
+        add_action::<PasteAction>(&window, &sender, || WindowInput::Paste);
+        add_action::<ZoomInAction>(&window, &sender, || WindowInput::ZoomIn);
+        add_action::<ZoomOutAction>(&window, &sender, || WindowInput::ZoomOut);
+        add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset);
+        add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
 
         let shortcuts = Shortcuts::new()
             .inspect(|shortcuts| window.add_controller(shortcuts.controller().clone()))
@@ -411,7 +428,8 @@ impl Component for Window {
             find_bar,
             find_bar_revealer,
             _shortcuts: shortcuts,
-            cwd_handler: None,
+            copy_action,
+            terminal_handlers: None,
         };
         ComponentParts { model, widgets: () }
     }
