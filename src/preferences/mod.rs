@@ -559,6 +559,7 @@ impl Component for Preferences {
         group.add(&tab_position);
         behavior.add(&group);
         behavior.add(&window_group(&gsettings));
+        behavior.add(&telemetry_group(&init.settings));
 
         let switch_group = |title: &str, rows: &[(&str, &str, &'static str)]| {
             let group = widgets::group(Some(title));
@@ -969,6 +970,25 @@ fn highlight_group(
         })
         .collect();
     (group, rows)
+}
+
+/// The telemetry footer's update interval, a tty-rex setting. The footer
+/// follows changes as they are made.
+fn telemetry_group(settings: &AppSettings) -> adw::PreferencesGroup {
+    let interval = widgets::spin_row(
+        "Telemetry Update Interval",
+        Some("Seconds between updates of the network, CPU and memory readings"),
+        widgets::TELEMETRY_INTERVAL_RANGE,
+    );
+    widgets::bind(
+        settings.tty_rex_gsettings(),
+        tty_rex_key::TELEMETRY_INTERVAL,
+        &interval,
+        "value",
+    );
+    let group = widgets::group(Some("Telemetry"));
+    group.add(&interval);
+    group
 }
 
 /// "Restore Session" and the "Restore Window Size" expander.

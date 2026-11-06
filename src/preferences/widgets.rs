@@ -29,7 +29,7 @@ use gtk::{gdk, gio, glib};
 
 use crate::choices::{self, Choice};
 use crate::color_dialog;
-use crate::settings::AppSettings;
+use crate::settings::{self, AppSettings};
 
 pub const UNDO_LABEL: &str = "Undo";
 pub const COPIED_TOAST_TIMEOUT_SECS: u32 = 3;
@@ -88,6 +88,13 @@ pub type SpinRange = (f64, f64, f64, f64, u32);
 pub const SPACING_RANGE: SpinRange = (1.0, 2.0, 0.1, 0.5, 1);
 pub const GRID_RANGE: SpinRange = (1.0, 65535.0, 1.0, 10.0, 0);
 pub const SCROLLBACK_RANGE: SpinRange = (0.0, 2_147_483_647.0, 10.0, 100.0, 0);
+pub const TELEMETRY_INTERVAL_RANGE: SpinRange = (
+    settings::TELEMETRY_INTERVAL_MIN as f64,
+    settings::TELEMETRY_INTERVAL_MAX as f64,
+    1.0,
+    10.0,
+    0,
+);
 
 pub fn spin_row(title: &str, subtitle: Option<&str>, range: SpinRange) -> adw::SpinRow {
     let (lower, upper, step, page, digits) = range;
