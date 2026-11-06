@@ -21,13 +21,25 @@
 //! preferences pages, mirroring the widgets declared in
 //! `src/ptyxis-preferences-window.ui` and `src/ptyxis-profile-editor.ui`.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 
 use crate::choices::{self, Choice};
+use crate::settings::AppSettings;
 
 pub const UNDO_LABEL: &str = "Undo";
 pub const COPIED_TOAST_TIMEOUT_SECS: u32 = 3;
+const RESET_COLOR_ICON: &str = "edit-undo-symbolic";
+const RESET_COLOR_TOOLTIP: &str = "Use Palette Color";
+const CHOOSE_COLOR_TOOLTIP: &str = "Choose Color";
+/// Color swatch size (width, height), corner radius and outline.
+const SWATCH_SIZE: (i32, i32) = (32, 20);
+const SWATCH_RADIUS: f64 = 4.0;
+const SWATCH_OUTLINE_WIDTH: f64 = 1.0;
+const SWATCH_OUTLINE_ALPHA: f64 = 0.2;
 
 /// Formats an opacity like `opacity_to_label()` (`"%3.0lf%%"` of the
 /// floored percentage).
@@ -129,6 +141,153 @@ pub fn opacity_row() -> (adw::ActionRow, gtk::Adjustment, gtk::Label) {
     update_label(&adjustment);
     adjustment.connect_value_changed(update_label);
     (row, adjustment, label)
+}
+
+/// A row choosing a color for a tty-rex color setting, where an empty
+/// value means a color derived elsewhere (the palette's). That fallback
+/// is shown but not stored, and a reset button returns to it.
+///
+/// `gtk::ColorDialogButton` is not used because it only reports a pick
+/// through `notify::rgba`, which stays silent when the picked color equals
+/// the one shown, so choosing the palette color itself would not store it.
+/// Running the dialog from a plain button stores whatever it returns.
+pub struct ColorRow {
+    pub row: adw::ActionRow,
+    settings: AppSettings,
+    key: &'static str,
+    /// The color the swatch shows and the dialog starts from.
+    shown: Rc<Cell<gdk::RGBA>>,
+    swatch: gtk::DrawingArea,
+    reset: gtk::Button,
+}
+
+impl ColorRow {
+    pub fn new(settings: &AppSettings, key: &'static str, title: &str, subtitle: &str) -> Self {
+        let shown = Rc::new(Cell::new(gdk::RGBA::BLACK));
+        let swatch = gtk::DrawingArea::builder()
+            .content_width(SWATCH_SIZE.0)
+            .content_height(SWATCH_SIZE.1)
+            .build();
+        swatch.set_draw_func({
+            let shown = Rc::clone(&shown);
+            move |area, cr, width, height| {
+                draw_swatch(cr, &shown.get(), &area.color(), width, height)
+            }
+        });
+        let button = gtk::Button::builder()
+            .child(&swatch)
+            .tooltip_text(CHOOSE_COLOR_TOOLTIP)
+            .valign(gtk::Align::Center)
+            .build();
+        // The swatch has no text, so name the button after its row for
+        // screen readers; the tooltip only becomes the description.
+        button.update_property(&[gtk::accessible::Property::Label(title)]);
+        let reset = gtk::Button::builder()
+            .icon_name(RESET_COLOR_ICON)
+            .tooltip_text(RESET_COLOR_TOOLTIP)
+            .css_classes(["flat"])
+            .valign(gtk::Align::Center)
+            .build();
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .activatable_widget(&button)
+            .build();
+        row.add_suffix(&reset);
+        row.add_suffix(&button);
+
+        let store = move |settings: &AppSettings, color: Option<&gdk::RGBA>| {
+            if let Err(e) = settings.set_color_override(key, color) {
+                glib::g_warning!("tty-rex", "Cannot store {key}: {e}");
+            }
+        };
+        let dialog = gtk::ColorDialog::builder()
+            .title(title)
+            .with_alpha(false)
+            .build();
+        button.connect_clicked({
+            let settings = settings.clone();
+            let shown = Rc::clone(&shown);
+            move |button| {
+                let settings = settings.clone();
+                let parent = button.root().and_downcast::<gtk::Window>();
+                dialog.choose_rgba(
+                    parent.as_ref(),
+                    Some(&shown.get()),
+                    None::<&gio::Cancellable>,
+                    move |result| match result {
+                        Ok(color) => store(&settings, Some(&color)),
+                        Err(e)
+                            if e.matches(gtk::DialogError::Dismissed)
+                                || e.matches(gtk::DialogError::Cancelled) => {}
+                        Err(e) => glib::g_warning!("tty-rex", "Cannot choose {key}: {e}"),
+                    },
+                );
+            }
+        });
+        reset.connect_clicked({
+            let settings = settings.clone();
+            move |_| store(&settings, None)
+        });
+
+        Self {
+            row,
+            settings: settings.clone(),
+            key,
+            shown,
+            swatch,
+            reset,
+        }
+    }
+
+    /// Shows the stored color, or `fallback` when none (or an invalid one,
+    /// which is reported elsewhere) is stored.
+    pub fn refresh(&self, fallback: &gdk::RGBA) {
+        let chosen = self.settings.color_override(self.key);
+        self.shown.set(chosen.unwrap_or(*fallback));
+        self.swatch.queue_draw();
+        // An invalid value is offered for reset too, to clean it up.
+        self.reset
+            .set_sensitive(self.settings.has_color_override(self.key));
+    }
+}
+
+/// Fills a rounded rectangle with `color`, outlined in a faint `outline`
+/// (the widget's text color, so it shows in light and dark styles) so that
+/// colors close to the row's background stay visible.
+fn draw_swatch(
+    cr: &gtk::cairo::Context,
+    color: &gdk::RGBA,
+    outline: &gdk::RGBA,
+    width: i32,
+    height: i32,
+) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    let (width, height) = (f64::from(width), f64::from(height));
+    let inset = SWATCH_OUTLINE_WIDTH / 2.0;
+    let (left, top) = (inset, inset);
+    let (right, bottom) = (width - inset, height - inset);
+    let radius = SWATCH_RADIUS
+        .min((right - left) / 2.0)
+        .min((bottom - top) / 2.0);
+    cr.new_sub_path();
+    cr.arc(right - radius, top + radius, radius, -FRAC_PI_2, 0.0);
+    cr.arc(right - radius, bottom - radius, radius, 0.0, FRAC_PI_2);
+    cr.arc(left + radius, bottom - radius, radius, FRAC_PI_2, PI);
+    cr.arc(left + radius, top + radius, radius, PI, 3.0 * FRAC_PI_2);
+    cr.close_path();
+    cr.set_source_color(color);
+    // Cairo errors only latch on the context; there is nothing to recover.
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(
+        f64::from(outline.red()),
+        f64::from(outline.green()),
+        f64::from(outline.blue()),
+        SWATCH_OUTLINE_ALPHA,
+    );
+    cr.set_line_width(SWATCH_OUTLINE_WIDTH);
+    let _ = cr.stroke();
 }
 
 /// A boxed list as used for profiles and custom links.

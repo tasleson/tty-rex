@@ -39,10 +39,10 @@ use self::accel_dialog::{AccelDialog, AccelDialogInit};
 use self::custom_links::CustomLinksGroup;
 use self::profile_editor::{ProfileEditor, ProfileEditorInit, ProfileEditorInput};
 use crate::choices;
-use crate::palette::{self, Palette};
+use crate::palette::{self, Face, Palette, Scarf};
 use crate::palette_preview::PalettePreview;
 use crate::profile::{self, Profile, Profiles};
-use crate::settings::{AppSettings, key};
+use crate::settings::{AppSettings, key, tty_rex_key};
 use crate::shortcuts;
 
 const DEFAULT_HEIGHT: i32 = 700;
@@ -57,6 +57,26 @@ const SHORTCUT_DISABLED_PAGE: &str = "disabled";
 const SHORTCUT_LABEL_PAGE: &str = "label";
 const SHOW_ALL_PALETTES: (&str, &str) = ("Show All Palettes", "down-small-symbolic");
 const SHOW_FEWER_PALETTES: (&str, &str) = ("Show Fewer Palettes", "up-small-symbolic");
+
+/// Picks the palette highlight a color setting replaces.
+type HighlightOf = fn(&Face) -> &Scarf;
+
+/// Highlight color rows: title, subtitle, setting and the palette
+/// highlight shown while nothing is chosen.
+const HIGHLIGHT_ROWS: &[(&str, &str, &str, HighlightOf)] = &[
+    (
+        "Superuser Color",
+        "Header bar color while sudo or another superuser command runs",
+        tty_rex_key::SUPERUSER_HIGHLIGHT_COLOR,
+        |face| &face.superuser,
+    ),
+    (
+        "Remote Color",
+        "Header bar color while ssh or another remote command runs",
+        tty_rex_key::REMOTE_HIGHLIGHT_COLOR,
+        |face| &face.remote,
+    ),
+];
 
 /// Whether a palette appears in the Appearance grid (`do_filter_palettes()`):
 /// primary palettes and the current one always do; others only when all
@@ -91,6 +111,8 @@ pub enum PreferencesInput {
     AddProfile,
     EditProfile(String),
     SelectFont,
+    /// A tty-rex highlight color setting changed.
+    HighlightColorsChanged,
     /// Show the Shortcuts page (`ptyxis_preferences_window_edit_shortcuts()`).
     ShowShortcuts,
     EditShortcut {
@@ -108,6 +130,7 @@ pub struct Preferences {
     opacity_group: adw::PreferencesGroup,
     palette_flow: gtk::FlowBox,
     palette_previews: Vec<(PalettePreview, gtk::ToggleButton)>,
+    highlight_rows: Vec<(widgets::ColorRow, HighlightOf)>,
     show_all_palettes: bool,
     show_more: adw::ButtonContent,
     profiles_list: gtk::ListBox,
@@ -146,6 +169,19 @@ impl Preferences {
                 preview.set_selected(palette.id() == current);
                 self.palette_previews.push((preview, button));
             }
+        }
+        self.refresh_highlight_rows();
+    }
+
+    /// Shows the chosen highlight colors, or the default profile's palette
+    /// colors where none is chosen.
+    fn refresh_highlight_rows(&self) {
+        let Some(palette) = palette::lookup_or_default(&self.current_palette_id()) else {
+            return;
+        };
+        let face = palette.face(adw::StyleManager::default().is_dark());
+        for (row, highlight_of) in &self.highlight_rows {
+            row.refresh(&highlight_of(face).background);
         }
     }
 
@@ -505,6 +541,9 @@ impl Component for Preferences {
         group.add(&cursor_shape);
         group.add(&cursor_blink);
         appearance.add(&group);
+
+        let (group, highlight_rows) = highlight_group(&init.settings);
+        appearance.add(&group);
         root.add(&appearance);
 
         // Behavior
@@ -632,6 +671,12 @@ impl Component for Preferences {
             }
         });
         shared_handlers.push((gsettings.clone().upcast(), id));
+        let tty_rex_settings = init.settings.tty_rex_gsettings().clone();
+        let changed = input.clone();
+        let id = tty_rex_settings.connect_changed(None, move |_, _| {
+            changed.emit(PreferencesInput::HighlightColorsChanged)
+        });
+        shared_handlers.push((tty_rex_settings.upcast(), id));
         let style_manager = adw::StyleManager::default();
         let changed = input.clone();
         let id = style_manager
@@ -672,6 +717,7 @@ impl Component for Preferences {
             opacity_group,
             palette_flow,
             palette_previews: Vec::new(),
+            highlight_rows,
             show_all_palettes: false,
             show_more,
             profiles_list,
@@ -734,6 +780,7 @@ impl Component for Preferences {
             }
             PreferencesInput::EditProfile(uuid) => self.edit_profile(root, &uuid),
             PreferencesInput::SelectFont => self.select_font(root),
+            PreferencesInput::HighlightColorsChanged => self.refresh_highlight_rows(),
             PreferencesInput::ShowShortcuts => {
                 root.pop_subpage();
                 root.set_visible_page_name(SHORTCUTS_PAGE_NAME);
@@ -890,6 +937,35 @@ fn font_group(
     let group = widgets::group(Some("Font"));
     group.add(&expander);
     group
+}
+
+/// The `visual-process-leader` switch and the highlight colors it uses,
+/// which are only editable while it is on.
+fn highlight_group(
+    settings: &AppSettings,
+) -> (adw::PreferencesGroup, Vec<(widgets::ColorRow, HighlightOf)>) {
+    let gsettings = settings.gsettings();
+    let enabled = widgets::switch_row(
+        "Highlight Superuser and Remote Sessions",
+        Some("Color the header bar while sudo, ssh or similar tools lead the terminal"),
+    );
+    widgets::bind(gsettings, key::VISUAL_PROCESS_LEADER, &enabled, "active");
+
+    let group = widgets::group(Some("Session Highlighting"));
+    group.add(&enabled);
+    let rows = HIGHLIGHT_ROWS
+        .iter()
+        .map(|&(title, subtitle, setting, highlight_of)| {
+            let row = widgets::ColorRow::new(settings, setting, title, subtitle);
+            gsettings
+                .bind(key::VISUAL_PROCESS_LEADER, &row.row, "sensitive")
+                .get()
+                .build();
+            group.add(&row.row);
+            (row, highlight_of)
+        })
+        .collect();
+    (group, rows)
 }
 
 /// "Restore Session" and the "Restore Window Size" expander.
