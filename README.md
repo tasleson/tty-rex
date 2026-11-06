@@ -17,6 +17,10 @@ No installation is required: `build.rs` generates the schema from
 `GSETTINGS_SCHEMA_DIR` is set. tty-rex uses its own application id,
 `io.github.tasleson.TtyRex`, but reads and writes the regular
 `org.gnome.Ptyxis` settings, so your existing profiles and shortcuts apply.
+Settings Ptyxis has no key for live in tty-rex's own
+`io.github.tasleson.TtyRex` schema
+(`data/io.github.tasleson.TtyRex.gschema.xml`), compiled alongside it, so a
+`GSETTINGS_SCHEMA_DIR` must provide both.
 `glib-compile-resources` is needed at build time for the bundled icons.
 
 tty-rex understands `--tab`, `--new-window`, `--tab-with-profile`,
@@ -26,15 +30,16 @@ same meaning as in Ptyxis; `cargo run -- --help` lists them.
 
 ## Trying it safely
 
-Because the preferences window writes your real Ptyxis settings, try it
-with `GSETTINGS_BACKEND=memory cargo run -- -s`. The `-s` matters: without
-it a launch hands over to an already running tty-rex instance, which keeps
-using the real settings. The application id is fixed at build time
-(`TTY_REX_APP_ID=io.github.tasleson.TtyRex.Devel cargo build` produces a
-binary with a separate id, and the `.Devel` suffix adds libadwaita's
-development stripes). Importing or dropping palettes is not covered by the
-memory backend: it writes to `~/.local/share/<app-id>/palettes`, and
-palettes imported by Ptyxis are found as well.
+Because the preferences window writes your real Ptyxis and tty-rex
+settings, try it with `GSETTINGS_BACKEND=memory cargo run -- -s`. The `-s`
+matters: without it a launch hands over to an already running tty-rex
+instance, which keeps using the real settings. The application id is fixed
+at build time (`TTY_REX_APP_ID=io.github.tasleson.TtyRex.Devel cargo build`
+produces a binary with a separate id, and the `.Devel` suffix adds
+libadwaita's development stripes). Importing or dropping palettes is not
+covered by the memory backend: it writes to
+`~/.local/share/<app-id>/palettes`, and palettes imported by Ptyxis are
+found as well.
 
 ## Installing for your user
 

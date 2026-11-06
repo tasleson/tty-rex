@@ -46,10 +46,16 @@ pub const PROFILE_SCHEMA_ID: &str = "org.gnome.Ptyxis.Profile";
 pub const SHORTCUTS_SCHEMA_ID: &str = "org.gnome.Ptyxis.Shortcuts";
 pub const SHORTCUTS_SCHEMA_PATH: &str = "/org/gnome/Ptyxis/Shortcuts/";
 
+/// Settings tty-rex adds on top of Ptyxis's
+/// (`data/io.github.tasleson.TtyRex.gschema.xml`). Like [`SCHEMA_ID`] this
+/// does not follow a `TTY_REX_APP_ID` override, so every build shares them.
+pub const TTY_REX_SCHEMA_ID: &str = "io.github.tasleson.TtyRex";
+pub const TTY_REX_SCHEMA_PATH: &str = "/io/github/tasleson/TtyRex/";
+
 /// Resource base path, matching the C application's.
 pub const RESOURCE_BASE_PATH: &str = "/org/gnome/Ptyxis";
 
-/// Directory containing the schema compiled by `build.rs`, if
+/// Directory containing the schemas compiled by `build.rs`, if
 /// `glib-compile-schemas` was available at build time.
 pub const BUILD_SCHEMA_DIR: Option<&str> = option_env!("PTYXIS_BUILD_SCHEMA_DIR");
 
@@ -76,5 +82,11 @@ mod tests {
         assert!(SHORTCUTS_SCHEMA_PATH.starts_with(SCHEMA_PATH));
         assert!(PROFILE_SCHEMA_ID.starts_with(SCHEMA_ID));
         assert!(SHORTCUTS_SCHEMA_ID.starts_with(SCHEMA_ID));
+    }
+
+    #[test]
+    fn tty_rex_path_matches_id() {
+        let from_id = format!("/{}/", TTY_REX_SCHEMA_ID.replace('.', "/"));
+        assert_eq!(TTY_REX_SCHEMA_PATH, from_id);
     }
 }

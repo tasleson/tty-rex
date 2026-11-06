@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Settings tty-rex adds on top of the org.gnome.Ptyxis schemas. The id
+  stays the same whatever TTY_REX_APP_ID a binary is built with, so
+  development builds share these settings like they share Ptyxis's.
+
+  SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<schemalist>
+
+  <schema id="io.github.tasleson.TtyRex" path="/io/github/tasleson/TtyRex/">
+
+    <key name="superuser-highlight-color" type="s">
+      <default>''</default>
+      <summary>Superuser Highlight Color</summary>
+      <description>Window highlight background while a superuser process such as sudo leads the terminal, as a CSS color; alpha is ignored. Empty uses the palette's color.</description>
+    </key>
+
+    <key name="remote-highlight-color" type="s">
+      <default>''</default>
+      <summary>Remote Highlight Color</summary>
+      <description>Window highlight background while a remote process such as ssh leads the terminal, as a CSS color; alpha is ignored. Empty uses the palette's color.</description>
+    </key>
+
+  </schema>
+
+</schemalist>

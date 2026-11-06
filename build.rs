@@ -23,7 +23,9 @@
 //! using the same substitutions as Ptyxis's `src/meson.build` (non-development
 //! values, so existing user configuration under `/org/gnome/Ptyxis/` is
 //! read) and compiled with `glib-compile-schemas` so the binary can run
-//! uninstalled.
+//! uninstalled. tty-rex's own schema,
+//! `data/io.github.tasleson.TtyRex.gschema.xml`, is compiled into the same
+//! directory.
 //!
 //! The bundled palettes in `ptyxis/palettes/` are embedded into the binary
 //! (the C build does the same via GResource), keyed by file stem.
@@ -42,15 +44,17 @@ const PTYXIS_ASSETS_DIR: &str = "ptyxis";
 const SCHEMA_ID: &str = "org.gnome.Ptyxis";
 const SCHEMA_PATH: &str = "/org/gnome/Ptyxis/";
 const SCHEMA_TEMPLATE: &str = "org.gnome.Ptyxis.gschema.xml.in";
+/// tty-rex's own settings, see `config::TTY_REX_SCHEMA_ID`.
+const TTY_REX_DATA_DIR: &str = "data";
+const TTY_REX_SCHEMA_FILE: &str = "io.github.tasleson.TtyRex.gschema.xml";
 const PALETTES_DIR: &str = "palettes";
 const PALETTE_SUFFIX: &str = ".palette";
 const ICONS_DIR: &str = "icons";
 const RESOURCE_PREFIX: &str = "/org/gnome/Ptyxis";
 const RESOURCE_FILE: &str = "ptyxis.gresource";
 
-fn ptyxis_assets_dir() -> PathBuf {
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("set by cargo"));
-    manifest_dir.join(PTYXIS_ASSETS_DIR)
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("set by cargo"))
 }
 
 /// Mirrors the `schema_config` substitutions in `src/meson.build`.
@@ -70,7 +74,9 @@ fn substitutions() -> [(&'static str, String); 5] {
     ]
 }
 
-fn generate_schema(src_dir: &Path, out_dir: &Path) {
+/// Generates the Ptyxis schema, copies tty-rex's next to it and compiles
+/// both into `OUT_DIR/schemas`.
+fn generate_schemas(src_dir: &Path, data_dir: &Path, out_dir: &Path) {
     let template_path = src_dir.join(SCHEMA_TEMPLATE);
     println!("cargo::rerun-if-changed={}", template_path.display());
 
@@ -86,6 +92,17 @@ fn generate_schema(src_dir: &Path, out_dir: &Path) {
     let schema_file = schema_dir.join(format!("{SCHEMA_ID}.gschema.xml"));
     fs::write(&schema_file, schema)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", schema_file.display()));
+
+    let tty_rex_schema = data_dir.join(TTY_REX_SCHEMA_FILE);
+    println!("cargo::rerun-if-changed={}", tty_rex_schema.display());
+    let tty_rex_dest = schema_dir.join(TTY_REX_SCHEMA_FILE);
+    fs::copy(&tty_rex_schema, &tty_rex_dest).unwrap_or_else(|e| {
+        panic!(
+            "failed to copy {} to {}: {e}",
+            tty_rex_schema.display(),
+            tty_rex_dest.display()
+        )
+    });
 
     // A missing glib-compile-schemas is not fatal: an installed schema (or
     // GSETTINGS_SCHEMA_DIR) still works at runtime, so only warn.
@@ -205,10 +222,11 @@ fn generate_resources(src_dir: &Path, out_dir: &Path) {
 
 fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("set by cargo"));
-    let src_dir = ptyxis_assets_dir();
+    let manifest_dir = manifest_dir();
+    let src_dir = manifest_dir.join(PTYXIS_ASSETS_DIR);
 
     println!("cargo::rerun-if-changed=build.rs");
-    generate_schema(&src_dir, &out_dir);
+    generate_schemas(&src_dir, &manifest_dir.join(TTY_REX_DATA_DIR), &out_dir);
     generate_palettes(&src_dir, &out_dir);
     generate_resources(&src_dir, &out_dir);
 }

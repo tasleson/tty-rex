@@ -17,7 +17,8 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! GSettings access for the `org.gnome.Ptyxis` schema.
+//! GSettings access for the `org.gnome.Ptyxis` schema, plus the few
+//! settings tty-rex adds in its own `io.github.tasleson.TtyRex` schema.
 //!
 //! `gio::Settings::new()` aborts the process if a schema is missing, so all
 //! settings objects are created through [`open`], which resolves the schema
@@ -27,7 +28,7 @@
 //! schema (see `src/ptyxis-settings.c`), not per-profile ones.
 
 use gtk::prelude::*;
-use gtk::{gio, glib, pango};
+use gtk::{gdk, gio, glib, pango};
 
 use crate::config;
 
@@ -81,6 +82,17 @@ pub mod key {
     ];
 }
 
+/// Keys of tty-rex's own schema, [`config::TTY_REX_SCHEMA_ID`].
+pub mod tty_rex_key {
+    /// Window highlight backgrounds as CSS colors; empty means the
+    /// palette's own color. They are always drawn opaque.
+    pub const SUPERUSER_HIGHLIGHT_COLOR: &str = "superuser-highlight-color";
+    pub const REMOTE_HIGHLIGHT_COLOR: &str = "remote-highlight-color";
+
+    /// All keys, for validation against the schema.
+    pub const ALL: &[&str] = &[SUPERUSER_HIGHLIGHT_COLOR, REMOTE_HIGHLIGHT_COLOR];
+}
+
 /// Schema and key providing the desktop monospace font.
 const DESKTOP_INTERFACE_SCHEMA_ID: &str = "org.gnome.desktop.interface";
 pub const DESKTOP_MONOSPACE_FONT_KEY: &str = "monospace-font-name";
@@ -90,8 +102,9 @@ const FALLBACK_SYSTEM_FONT: &str = "Monospace 11";
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
     #[error(
-        "GSettings schema \"{0}\" is not installed; install Ptyxis or set \
-         GSETTINGS_SCHEMA_DIR to a directory containing the compiled schema"
+        "GSettings schema \"{0}\" is not installed; rebuild with glib-compile-schemas \
+         available, or set GSETTINGS_SCHEMA_DIR to a directory containing the \
+         compiled Ptyxis and tty-rex schemas"
     )]
     MissingSchema(String),
     #[error(
@@ -99,6 +112,31 @@ pub enum SettingsError {
          schema is probably older than this build"
     )]
     MissingKey { schema_id: String, key: String },
+    #[error("\"{value}\" in setting \"{key}\" is not a valid CSS color")]
+    InvalidColor { key: String, value: String },
+}
+
+/// Parses a color setting where an empty (or blank) value means "no
+/// override". Any alpha is dropped: a translucent highlight would let the
+/// title bar beneath it show through and muddle the color.
+pub fn parse_color_override(key: &str, value: &str) -> Result<Option<gdk::RGBA>, SettingsError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    gdk::RGBA::parse(value)
+        .map(|color| {
+            Some(gdk::RGBA::new(
+                color.red(),
+                color.green(),
+                color.blue(),
+                1.0,
+            ))
+        })
+        .map_err(|_| SettingsError::InvalidColor {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        })
 }
 
 /// Returns the schema source to resolve Ptyxis schemas from.
@@ -348,27 +386,80 @@ pub fn initial_grid_size(
     }
 }
 
-/// Typed accessors over the application-wide `org.gnome.Ptyxis` settings.
+/// Typed accessors over the application-wide `org.gnome.Ptyxis` settings
+/// and tty-rex's own ones.
 #[derive(Debug, Clone)]
 pub struct AppSettings {
     settings: gio::Settings,
+    tty_rex: gio::Settings,
     desktop: Option<gio::Settings>,
 }
 
 impl AppSettings {
     pub fn new() -> Result<Self, SettingsError> {
         let settings = open(config::SCHEMA_ID, None, key::ALL)?;
+        let tty_rex = open(config::TTY_REX_SCHEMA_ID, None, tty_rex_key::ALL)?;
+        // Every tab reads these, so invalid values are reported here, once
+        // at startup and once per change, rather than by each reader.
+        for key in tty_rex_key::ALL {
+            warn_if_invalid_color(&tty_rex, key);
+        }
+        tty_rex.connect_changed(None, |settings, key| {
+            if tty_rex_key::ALL.contains(&key) {
+                warn_if_invalid_color(settings, key);
+            }
+        });
         // The desktop schema is optional (e.g. non-GNOME sessions).
         let desktop = gio::SettingsSchemaSource::default()
             .and_then(|source| source.lookup(DESKTOP_INTERFACE_SCHEMA_ID, true))
             .filter(|schema| schema.has_key(DESKTOP_MONOSPACE_FONT_KEY))
             .map(|schema| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None));
-        Ok(Self { settings, desktop })
+        Ok(Self {
+            settings,
+            tty_rex,
+            desktop,
+        })
     }
 
     /// The underlying settings, for connecting change notifications.
     pub fn gsettings(&self) -> &gio::Settings {
         &self.settings
+    }
+
+    /// Settings of tty-rex's own schema (keys in [`tty_rex_key`]).
+    pub fn tty_rex_gsettings(&self) -> &gio::Settings {
+        &self.tty_rex
+    }
+
+    /// The color stored in the tty-rex color setting `key`, or `None` to use
+    /// the palette's. An invalid value is ignored (and reported when it is
+    /// stored), so a bad edit with `gsettings` or `dconf` never breaks the
+    /// window colors.
+    pub fn color_override(&self, key: &str) -> Option<gdk::RGBA> {
+        parse_color_override(key, &self.tty_rex.string(key))
+            .ok()
+            .flatten()
+    }
+
+    /// Whether the tty-rex color setting `key` holds anything, valid or not.
+    pub fn has_color_override(&self, key: &str) -> bool {
+        !self.tty_rex.string(key).trim().is_empty()
+    }
+
+    /// Stores `color` in the tty-rex color setting `key`; `None` goes back
+    /// to the palette's color.
+    pub fn set_color_override(
+        &self,
+        key: &str,
+        color: Option<&gdk::RGBA>,
+    ) -> Result<(), glib::BoolError> {
+        match color {
+            Some(color) => self.tty_rex.set_string(key, &color.to_str()),
+            None => {
+                self.tty_rex.reset(key);
+                Ok(())
+            }
+        }
     }
 
     /// Desktop interface settings, if the schema is installed.
@@ -473,6 +564,12 @@ impl AppSettings {
     }
 }
 
+fn warn_if_invalid_color(settings: &gio::Settings, key: &str) {
+    if let Err(e) = parse_color_override(key, &settings.string(key)) {
+        glib::g_warning!("tty-rex", "{e}; using the palette color");
+    }
+}
+
 /// Looks up a schema by id, searching parent sources too.
 pub fn lookup_schema(schema_id: &str) -> Option<gio::SettingsSchema> {
     schema_source()?.lookup(schema_id, true)
@@ -569,6 +666,93 @@ pub(crate) mod tests {
             eprintln!("schema {schema_id} unavailable (no glib-compile-schemas); skipping");
         }
         schema
+    }
+
+    const TTY_REX_SCHEMA: &str = include_str!("../data/io.github.tasleson.TtyRex.gschema.xml");
+
+    #[test]
+    fn tty_rex_schema_matches_config() {
+        assert!(TTY_REX_SCHEMA.contains(&format!(
+            "<schema id=\"{}\" path=\"{}\">",
+            config::TTY_REX_SCHEMA_ID,
+            config::TTY_REX_SCHEMA_PATH
+        )));
+        for key in tty_rex_key::ALL {
+            let start = TTY_REX_SCHEMA
+                .find(&format!("<key name=\"{key}\" type=\"s\">"))
+                .unwrap_or_else(|| panic!("{key} missing from tty-rex schema"));
+            // Empty means "use the palette color", so it must be the default.
+            assert!(
+                TTY_REX_SCHEMA[start..]
+                    .trim_start_matches(|c| c != '\n')
+                    .trim_start()
+                    .starts_with("<default>''</default>"),
+                "{key} should default to ''"
+            );
+        }
+        if let Some(schema) = expected_schema(config::TTY_REX_SCHEMA_ID) {
+            assert_eq!(schema.path().as_deref(), Some(config::TTY_REX_SCHEMA_PATH));
+            assert!(open(config::TTY_REX_SCHEMA_ID, None, tty_rex_key::ALL).is_ok());
+        }
+    }
+
+    #[test]
+    fn color_override_parsing() {
+        let cases = [
+            ("", Ok(None)),
+            ("  ", Ok(None)),
+            ("#ff0000", Ok(Some(gdk::RGBA::RED))),
+            (" rgb(0,0,255) ", Ok(Some(gdk::RGBA::BLUE))),
+            ("red", Ok(Some(gdk::RGBA::RED))),
+            // Highlights are always opaque.
+            ("rgba(255,0,0,0.3)", Ok(Some(gdk::RGBA::RED))),
+            ("rgba(0,0,255,0)", Ok(Some(gdk::RGBA::BLUE))),
+            ("nope", Err("nope")),
+            ("#12", Err("#12")),
+        ];
+        for (value, expected) in cases {
+            let result = parse_color_override("k", value);
+            match (result, expected) {
+                (Ok(color), Ok(expected)) => assert_eq!(color, expected, "{value:?}"),
+                (Err(SettingsError::InvalidColor { key, value: bad }), Err(expected)) => {
+                    assert_eq!((key.as_str(), bad.as_str()), ("k", expected));
+                }
+                (result, _) => panic!("{value:?}: unexpected {result:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn color_overrides_round_trip() {
+        if expected_schema(config::TTY_REX_SCHEMA_ID).is_none() {
+            return;
+        }
+        use_memory_backend();
+        let settings = AppSettings::new().unwrap();
+        let key = tty_rex_key::REMOTE_HIGHLIGHT_COLOR;
+        assert_eq!(settings.color_override(key), None);
+        assert!(!settings.has_color_override(key));
+        let color = gdk::RGBA::new(0.2, 0.4, 0.6, 1.0);
+        settings.set_color_override(key, Some(&color)).unwrap();
+        let stored = settings.color_override(key).expect("stored color");
+        assert!(
+            [
+                (stored.red(), color.red()),
+                (stored.green(), color.green()),
+                (stored.blue(), color.blue()),
+            ]
+            .iter()
+            .all(|(a, b)| (a - b).abs() < 1.0 / 255.0),
+            "{stored} != {color}"
+        );
+        settings
+            .tty_rex_gsettings()
+            .set_string(key, "bogus")
+            .unwrap();
+        assert_eq!(settings.color_override(key), None);
+        assert!(settings.has_color_override(key));
+        settings.set_color_override(key, None).unwrap();
+        assert_eq!(settings.tty_rex_gsettings().string(key), "");
     }
 
     #[test]
@@ -671,6 +855,7 @@ pub(crate) mod tests {
             config::SCHEMA_ID,
             config::PROFILE_SCHEMA_ID,
             config::SHORTCUTS_SCHEMA_ID,
+            config::TTY_REX_SCHEMA_ID,
         ] {
             expected_schema(id);
         }
