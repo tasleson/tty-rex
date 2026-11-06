@@ -37,6 +37,7 @@
 pub mod app;
 pub mod choices;
 pub mod cli;
+pub mod color_dialog;
 pub mod config;
 pub mod dressing;
 pub mod find_bar;

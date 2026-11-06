@@ -28,6 +28,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use crate::choices::{self, Choice};
+use crate::color_dialog;
 use crate::settings::AppSettings;
 
 pub const UNDO_LABEL: &str = "Undo";
@@ -201,26 +202,23 @@ impl ColorRow {
                 glib::g_warning!("tty-rex", "Cannot store {key}: {e}");
             }
         };
-        let dialog = gtk::ColorDialog::builder()
-            .title(title)
-            .with_alpha(false)
-            .build();
+        let dialog = color_dialog::new(title);
         button.connect_clicked({
             let settings = settings.clone();
             let shown = Rc::clone(&shown);
             move |button| {
                 let settings = settings.clone();
                 let parent = button.root().and_downcast::<gtk::Window>();
-                dialog.choose_rgba(
+                color_dialog::choose(
+                    &dialog,
                     parent.as_ref(),
                     Some(&shown.get()),
-                    None::<&gio::Cancellable>,
-                    move |result| match result {
-                        Ok(color) => store(&settings, Some(&color)),
-                        Err(e)
-                            if e.matches(gtk::DialogError::Dismissed)
-                                || e.matches(gtk::DialogError::Cancelled) => {}
-                        Err(e) => glib::g_warning!("tty-rex", "Cannot choose {key}: {e}"),
+                    None,
+                    key,
+                    move |color| {
+                        if let Some(color) = color {
+                            store(&settings, Some(&color));
+                        }
                     },
                 );
             }
