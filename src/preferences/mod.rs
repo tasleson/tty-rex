@@ -135,7 +135,7 @@ pub struct Preferences {
     show_more: adw::ButtonContent,
     profiles_list: gtk::ListBox,
     profile_editor: Option<Controller<ProfileEditor>>,
-    shortcut_settings: Option<gio::Settings>,
+    shortcut_settings: Option<shortcuts::ShortcutSettings>,
     accel_dialog: Option<Controller<AccelDialog>>,
     /// Profiles shown in the list, kept alive for their label handlers.
     listed_profiles: Vec<Profile>,
@@ -788,9 +788,10 @@ impl Component for Preferences {
                 root.set_visible_page_name(SHORTCUTS_PAGE_NAME);
             }
             PreferencesInput::EditShortcut { key, title } => {
-                let Some(settings) = self.shortcut_settings.clone() else {
+                let Some(settings) = &self.shortcut_settings else {
                     return;
                 };
+                let settings = settings.for_key(key).clone();
                 let dialog = AccelDialog::builder()
                     .launch(AccelDialogInit {
                         title: title.to_owned(),
@@ -817,7 +818,7 @@ impl Component for Preferences {
 /// The Shortcuts page: one row per shortcut key, grouped as in the C
 /// template (`PtyxisShortcutRow`).
 fn shortcuts_page(
-    settings: &gio::Settings,
+    settings: &shortcuts::ShortcutSettings,
     input: &relm4::Sender<PreferencesInput>,
 ) -> adw::PreferencesPage {
     let page = widgets::page(
@@ -828,7 +829,7 @@ fn shortcuts_page(
     for (title, entries) in shortcuts::EDITOR_GROUPS {
         let group = widgets::group(*title);
         for entry in *entries {
-            group.add(&shortcut_row(settings, entry, input));
+            group.add(&shortcut_row(settings.for_key(entry.key), entry, input));
         }
         page.add(&group);
     }

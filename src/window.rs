@@ -38,6 +38,7 @@ use crate::config;
 use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
 use crate::settings::NewTabPosition;
 use crate::shortcuts::Shortcuts;
+use crate::telemetry_bar::{TelemetryBar, TelemetryBarInput};
 use crate::terminal;
 use crate::title_dialog::SET_TITLE_LABEL;
 
@@ -92,7 +93,18 @@ relm4::new_stateless_action!(pub ZoomOutAction, WindowActions, "zoom-out");
 relm4::new_stateless_action!(pub ZoomOneAction, WindowActions, "zoom-one");
 relm4::new_stateless_action!(pub SearchAction, WindowActions, "search");
 relm4::new_stateless_action!(pub SetTitleAction, WindowActions, "set-title");
-// Tab colors are a tty-rex addition, so these have no C counterpart.
+// Tab colors and the telemetry footer are tty-rex additions, so these
+// have no C counterpart. The telemetry action's state is whether the
+// footer shows; activating it toggles that.
+relm4::new_stateful_action!(
+    pub ToggleTelemetryAction,
+    WindowActions,
+    "toggle-telemetry",
+    (),
+    bool
+);
+/// Label of the telemetry toggle in menus.
+pub const TOGGLE_TELEMETRY_LABEL: &str = "Show _Telemetry";
 relm4::new_stateless_action!(pub SetTabColorAction, WindowActions, "set-tab-color");
 relm4::new_stateless_action!(pub ResetTabColorAction, WindowActions, "reset-tab-color");
 relm4::new_stateless_action!(pub TabOverviewAction, WindowActions, "tab-overview");
@@ -132,6 +144,8 @@ pub enum WindowInput {
     ZoomReset,
     ShowFind,
     FindDismissed,
+    /// The telemetry footer was toggled to this visibility.
+    SetTelemetryVisible(bool),
     SetTitle,
     SetTabColor,
     ResetTabColor,
@@ -161,6 +175,8 @@ pub struct Window {
     title_bindings: glib::BindingGroup,
     find_bar: Controller<FindBar>,
     find_bar_revealer: gtk::Revealer,
+    telemetry_bar: Controller<TelemetryBar>,
+    telemetry_revealer: gtk::Revealer,
     /// Kept alive so the controller follows settings changes.
     _shortcuts: Option<Shortcuts>,
     /// Disabled without a selection so the shortcut reaches the terminal.
@@ -300,6 +316,10 @@ impl Window {
         }
         self.find_bar.emit(FindBarInput::SetTerminal(
             tab.as_ref().map(|t| t.terminal.clone()),
+        ));
+        // Unlike the find bar, the footer stays and follows the selection.
+        self.telemetry_bar.emit(TelemetryBarInput::SetTab(
+            tab.as_ref().map(|t| Rc::clone(&t.child_pid)),
         ));
         let Some(page) = page else {
             self.find_bar_revealer.set_reveal_child(false);
@@ -630,9 +650,20 @@ impl Component for Window {
             .child(find_bar.widget())
             .build();
 
+        // One footer per window, below the find bar, hidden at first.
+        let telemetry_bar = TelemetryBar::builder()
+            .launch(app.settings().clone())
+            .detach();
+        let telemetry_revealer = gtk::Revealer::builder()
+            .reveal_child(false)
+            .transition_duration(0)
+            .child(telemetry_bar.widget())
+            .build();
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&tab_view);
         content.append(&find_bar_revealer);
+        content.append(&telemetry_revealer);
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_css_class(WINDOW_CONTENTS_CLASS);
@@ -720,6 +751,13 @@ impl Component for Window {
         add_action::<ZoomOutAction>(&window, &sender, || WindowInput::ZoomOut);
         add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset);
         add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
+        let input = sender.input_sender().clone();
+        let toggle_telemetry =
+            RelmAction::<ToggleTelemetryAction>::new_stateful(&false, move |_, visible| {
+                *visible = !*visible;
+                input.emit(WindowInput::SetTelemetryVisible(*visible));
+            });
+        window.add_action(toggle_telemetry.gio_action());
         add_action::<SetTitleAction>(&window, &sender, || WindowInput::SetTitle);
         add_action::<SetTabColorAction>(&window, &sender, || WindowInput::SetTabColor);
         let reset_color =
@@ -807,6 +845,8 @@ impl Component for Window {
             title_bindings,
             find_bar,
             find_bar_revealer,
+            telemetry_bar,
+            telemetry_revealer,
             _shortcuts: shortcuts,
             copy_action,
             _pinned_signals: pinned_signals,
@@ -886,6 +926,11 @@ impl Component for Window {
             }
             WindowInput::ShowKeyboardShortcuts => {
                 self.app.show_shortcuts(Some(self.window.upcast_ref()));
+            }
+            WindowInput::SetTelemetryVisible(visible) => {
+                self.telemetry_revealer.set_reveal_child(visible);
+                self.telemetry_bar
+                    .emit(TelemetryBarInput::SetVisible(visible));
             }
             WindowInput::FindDismissed => {
                 self.find_bar_revealer.set_reveal_child(false);

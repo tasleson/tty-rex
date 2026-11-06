@@ -46,9 +46,10 @@ use crate::palette;
 use crate::profile::Profile;
 use crate::settings::{self, AppSettings, ExitAction};
 use crate::spawn::{ChildExit, SpawnError, SpawnRequest, Spawner};
+use crate::telemetry::Pid;
 use crate::terminal::{self, ZoomLevel};
 use crate::title_dialog::{SET_TITLE_LABEL, TitleDialog};
-use crate::window::SetTitleAction;
+use crate::window::{SetTitleAction, TOGGLE_TELEMETRY_LABEL, ToggleTelemetryAction};
 
 /// Exits faster than this without user input are treated as failures so the
 /// error stays visible (see `ptyxis_tab_wait_cb()`).
@@ -290,11 +291,15 @@ impl LeaderMonitor {
 }
 
 /// The terminal context menu: the items of `src/ptyxis-terminal.ui` whose
-/// actions the port implements.
+/// actions the port implements, plus tty-rex's telemetry toggle.
 fn context_menu() -> gio::Menu {
     let menu = gio::Menu::new();
     let section = gio::Menu::new();
     section.append(Some("Search…"), Some("win.search"));
+    // A check item, as the action's state is the footer's visibility.
+    section.append_item(&RelmAction::<ToggleTelemetryAction>::to_menu_item(
+        TOGGLE_TELEMETRY_LABEL,
+    ));
     menu.append_section(None, &section);
     let section = gio::Menu::new();
     section.append(Some("_Copy"), Some("win.copy-clipboard"));
@@ -371,6 +376,8 @@ pub struct TabInit {
     pub zoom: Rc<Cell<ZoomLevel>>,
     /// The tab's color, shared with windows for the tab menu.
     pub color: Rc<Cell<Option<gdk::RGBA>>>,
+    /// The running child's pid, shared with windows for telemetry.
+    pub child_pid: Rc<Cell<Option<Pid>>>,
     pub grid_size: Option<(u32, u32)>,
 }
 
@@ -443,6 +450,8 @@ pub struct Tab {
     color_icon: Option<gio::Icon>,
     /// Cancels the open color dialog.
     color_dialog: Option<gio::Cancellable>,
+    /// The running child's pid; `None` while spawning or after it exited.
+    child_pid: Rc<Cell<Option<Pid>>>,
     /// Identifies the current color dialog, like `title_dialog_serial`.
     color_dialog_serial: u32,
     leader_kind: LeaderKind,
@@ -645,6 +654,7 @@ impl Tab {
     }
 
     fn handle_exit(&mut self, exit: ChildExit, root: &gtk::Box, sender: &ComponentSender<Self>) {
+        self.child_pid.set(None);
         self.state = if exit.is_success() {
             TabState::Exited
         } else {
@@ -825,6 +835,7 @@ impl Component for Tab {
             title_dialog: None,
             title_dialog_serial: 0,
             color: init.color,
+            child_pid: init.child_pid,
             color_icon: None,
             color_dialog: None,
             color_dialog_serial: 0,
@@ -858,7 +869,8 @@ impl Component for Tab {
                     self.respawn(&sender);
                 }
             }
-            TabInput::Spawned(Ok(_pid)) => {
+            TabInput::Spawned(Ok(pid)) => {
+                self.child_pid.set(Some(pid.0));
                 self.state = TabState::Running;
                 self.spawned_at = Instant::now();
             }

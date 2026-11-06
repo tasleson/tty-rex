@@ -28,6 +28,12 @@ tty-rex understands `--tab`, `--new-window`, `--tab-with-profile`,
 `-s`/`--standalone`, `--preferences` and `--import-palette FILE` with the
 same meaning as in Ptyxis; `cargo run -- --help` lists them.
 
+Beyond Ptyxis, "Show Telemetry" in the terminal's context menu
+(<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> by default) toggles a footer
+with the network (TCP only), CPU and memory use of the processes started
+from the selected tab. It reads `/proc` and the kernel's socket
+diagnostics, which need no privileges.
+
 ## Trying it safely
 
 Because the preferences window writes your real Ptyxis and tty-rex

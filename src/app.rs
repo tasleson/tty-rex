@@ -42,6 +42,7 @@ use crate::profile::{Profile, Profiles};
 use crate::settings::{self, AppSettings, SettingsError};
 use crate::spawn::{HostSpawner, Spawner};
 use crate::tab::{Tab, TabInit, TabInput};
+use crate::telemetry::Pid;
 use crate::terminal::ZoomLevel;
 use crate::window::{NewTabWithProfileAction, Window, WindowInit, WindowInput};
 
@@ -77,6 +78,7 @@ struct TabHandle {
     profile_uuid: String,
     zoom: Rc<Cell<ZoomLevel>>,
     color: Rc<Cell<Option<gdk::RGBA>>>,
+    child_pid: Rc<Cell<Option<Pid>>>,
     css_class: String,
 }
 
@@ -90,6 +92,8 @@ pub struct TabRef {
     pub color: Rc<Cell<Option<gdk::RGBA>>>,
     /// Added to the window while the tab is selected (see `Tab::css_class`).
     pub css_class: String,
+    /// The tab's running child process, if any.
+    pub child_pid: Rc<Cell<Option<Pid>>>,
 }
 
 /// Handle to a launched window.
@@ -278,6 +282,7 @@ impl App {
         let profile_uuid = profile.uuid().to_owned();
         let zoom = Rc::new(Cell::new(request.zoom));
         let color = Rc::new(Cell::new(None));
+        let child_pid = Rc::new(Cell::new(None));
         let controller = Tab::builder()
             .launch(TabInit {
                 profile,
@@ -289,6 +294,7 @@ impl App {
                 title_prefix: request.title_prefix,
                 zoom: Rc::clone(&zoom),
                 color: Rc::clone(&color),
+                child_pid: Rc::clone(&child_pid),
                 grid_size: request.grid_size,
             })
             .detach();
@@ -303,6 +309,7 @@ impl App {
                 profile_uuid,
                 zoom,
                 color,
+                child_pid,
                 css_class,
             },
         );
@@ -317,6 +324,7 @@ impl App {
             zoom: Rc::clone(&handle.zoom),
             color: Rc::clone(&handle.color),
             css_class: handle.css_class.clone(),
+            child_pid: Rc::clone(&handle.child_pid),
         })
     }
 

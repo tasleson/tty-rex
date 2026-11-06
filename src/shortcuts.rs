@@ -20,6 +20,11 @@
 //! Keyboard shortcuts configured in `org.gnome.Ptyxis.Shortcuts`
 //! (`src/ptyxis-shortcuts.c`).
 //!
+//! Shortcuts for actions only tty-rex has ([`TTY_REX_KEYS`]) live in the
+//! same format in tty-rex's own `io.github.tasleson.TtyRex.Shortcuts`
+//! schema, since the Ptyxis schema is used unchanged;
+//! [`ShortcutSettings::for_key`] picks the right one.
+//!
 //! Like the C window, shortcuts are installed as a capture-phase
 //! `gtk::ShortcutController` on each window so they take precedence over
 //! the terminal, and are rebuilt whenever the settings change.
@@ -47,6 +52,8 @@ pub mod key {
     pub const SHOW_KEYBOARD_SHORTCUTS: &str = "show-keyboard-shortcuts";
     pub const SEARCH: &str = "search";
     pub const SET_TITLE: &str = "set-title";
+    /// In tty-rex's own schema (see [`super::TTY_REX_KEYS`]).
+    pub const TOGGLE_TELEMETRY: &str = "toggle-telemetry";
     pub const TAB_OVERVIEW: &str = "tab-overview";
     pub const ZOOM_IN: &str = "zoom-in";
     pub const ZOOM_ONE: &str = "zoom-one";
@@ -70,6 +77,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     (key::SHOW_KEYBOARD_SHORTCUTS, "win.show-keyboard-shortcuts"),
     (key::SEARCH, "win.search"),
     (key::SET_TITLE, "win.set-title"),
+    (key::TOGGLE_TELEMETRY, "win.toggle-telemetry"),
     (key::TAB_OVERVIEW, "win.tab-overview"),
     (key::ZOOM_IN, "win.zoom-in"),
     (key::ZOOM_ONE, "win.zoom-one"),
@@ -119,6 +127,22 @@ pub const ALL_KEYS: &[&str] = &[
     "set-title",
     "show-keyboard-shortcuts",
 ];
+
+/// Every key of tty-rex's own shortcuts schema,
+/// [`config::TTY_REX_SHORTCUTS_SCHEMA_ID`].
+pub const TTY_REX_KEYS: &[&str] = &[key::TOGGLE_TELEMETRY];
+
+/// The schema id and path holding the shortcut `key`.
+fn schema_of(key: &str) -> (&'static str, &'static str) {
+    if TTY_REX_KEYS.contains(&key) {
+        (
+            config::TTY_REX_SHORTCUTS_SCHEMA_ID,
+            config::TTY_REX_SHORTCUTS_SCHEMA_PATH,
+        )
+    } else {
+        (config::SHORTCUTS_SCHEMA_ID, config::SHORTCUTS_SCHEMA_PATH)
+    }
+}
 
 /// A row of the Shortcuts preferences page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +198,17 @@ pub const EDITOR_GROUPS: &[ShortcutGroup] = &[
             entry("reset-and-clear", "Reset and Clear"),
         ],
     ),
-    (None, &[entry("search", "Search History")]),
+    (
+        None,
+        &[
+            entry("search", "Search History"),
+            described(
+                key::TOGGLE_TELEMETRY,
+                "Show Telemetry",
+                "Toggle network, CPU and memory readings for the current tab",
+            ),
+        ],
+    ),
     (None, &[entry("popup-menu", "Show Context Menu")]),
     (
         Some("Windows"),
@@ -300,7 +334,7 @@ pub const EDITOR_GROUPS: &[ShortcutGroup] = &[
 
 /// The schema default for a shortcut (`ptyxis_shortcuts_get_default_accelerator()`).
 pub fn default_accelerator(key: &str) -> Option<String> {
-    settings::lookup_schema(config::SHORTCUTS_SCHEMA_ID)
+    settings::lookup_schema(schema_of(key).0)
         .filter(|schema| schema.has_key(key))?
         .key(key)
         .default_value()
@@ -308,14 +342,43 @@ pub fn default_accelerator(key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The Ptyxis shortcut settings and tty-rex's own.
+#[derive(Debug, Clone)]
+pub struct ShortcutSettings {
+    ptyxis: gio::Settings,
+    tty_rex: gio::Settings,
+}
+
+impl ShortcutSettings {
+    /// The settings holding the shortcut `key`.
+    pub fn for_key(&self, key: &str) -> &gio::Settings {
+        if schema_of(key).0 == config::TTY_REX_SHORTCUTS_SCHEMA_ID {
+            &self.tty_rex
+        } else {
+            &self.ptyxis
+        }
+    }
+
+    fn all(&self) -> [&gio::Settings; 2] {
+        [&self.ptyxis, &self.tty_rex]
+    }
+}
+
 /// Opens the shortcut settings without installing a controller, for the
 /// preferences editor.
-pub fn open_settings() -> Result<gio::Settings, SettingsError> {
-    settings::open(
-        config::SHORTCUTS_SCHEMA_ID,
-        Some(config::SHORTCUTS_SCHEMA_PATH),
-        ALL_KEYS,
-    )
+pub fn open_settings() -> Result<ShortcutSettings, SettingsError> {
+    Ok(ShortcutSettings {
+        ptyxis: settings::open(
+            config::SHORTCUTS_SCHEMA_ID,
+            Some(config::SHORTCUTS_SCHEMA_PATH),
+            ALL_KEYS,
+        )?,
+        tty_rex: settings::open(
+            config::TTY_REX_SHORTCUTS_SCHEMA_ID,
+            Some(config::TTY_REX_SHORTCUTS_SCHEMA_PATH),
+            TTY_REX_KEYS,
+        )?,
+    })
 }
 
 /// Returns the accelerator to install, or `None` when the user disabled
@@ -328,7 +391,7 @@ pub fn effective_accel(value: &str) -> Option<&str> {
 /// Shortcut settings plus the controller they populate.
 #[derive(Debug)]
 pub struct Shortcuts {
-    settings: gio::Settings,
+    settings: ShortcutSettings,
     controller: gtk::ShortcutController,
 }
 
@@ -344,14 +407,20 @@ impl Shortcuts {
         };
         shortcuts.reload();
 
-        let controller = shortcuts.controller.downgrade();
-        shortcuts
-            .settings
-            .connect_changed(None, move |settings, _| {
-                if let Some(controller) = controller.upgrade() {
-                    populate(&controller, settings);
+        // Weak references: the handlers live as long as the settings.
+        let ptyxis = shortcuts.settings.ptyxis.downgrade();
+        let tty_rex = shortcuts.settings.tty_rex.downgrade();
+        for settings in shortcuts.settings.all() {
+            let controller = shortcuts.controller.downgrade();
+            let (ptyxis, tty_rex) = (ptyxis.clone(), tty_rex.clone());
+            settings.connect_changed(None, move |_, _| {
+                if let (Some(controller), Some(ptyxis), Some(tty_rex)) =
+                    (controller.upgrade(), ptyxis.upgrade(), tty_rex.upgrade())
+                {
+                    populate(&controller, &ShortcutSettings { ptyxis, tty_rex });
                 }
             });
+        }
         Ok(shortcuts)
     }
 
@@ -364,13 +433,13 @@ impl Shortcuts {
     }
 }
 
-fn populate(controller: &gtk::ShortcutController, settings: &gio::Settings) {
+fn populate(controller: &gtk::ShortcutController, settings: &ShortcutSettings) {
     while let Some(shortcut) = controller.item(0).and_downcast::<gtk::Shortcut>() {
         controller.remove_shortcut(&shortcut);
     }
 
     for (key, action) in BINDINGS {
-        let value = settings.string(key);
+        let value = settings.for_key(key).string(key);
         let Some(accel) = effective_accel(&value) else {
             continue;
         };
@@ -392,17 +461,44 @@ mod tests {
         CloseOtherTabsAction, CloseTabAction, CopyAction, DetachTabAction, MoveTabLeftAction,
         MoveTabRightAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
         PreferencesAction, PreviousTabAction, SearchAction, SetTitleAction,
-        ShowKeyboardShortcutsAction, TabOverviewAction, ZoomInAction, ZoomOneAction, ZoomOutAction,
+        ShowKeyboardShortcutsAction, TabOverviewAction, ToggleTelemetryAction, ZoomInAction,
+        ZoomOneAction, ZoomOutAction,
     };
     use relm4::actions::ActionName;
+
+    const TTY_REX_SCHEMA: &str = include_str!("../data/io.github.tasleson.TtyRex.gschema.xml");
+
+    /// The `<schema>` element of tty-rex's shortcuts schema.
+    fn tty_rex_shortcuts_block() -> &'static str {
+        let start = TTY_REX_SCHEMA
+            .find(&format!(
+                "<schema id=\"{}\" path=\"{}\">",
+                config::TTY_REX_SHORTCUTS_SCHEMA_ID,
+                config::TTY_REX_SHORTCUTS_SCHEMA_PATH
+            ))
+            .expect("tty-rex shortcuts schema");
+        let block = &TTY_REX_SCHEMA[start..];
+        &block[..block.find("</schema>").unwrap()]
+    }
 
     #[test]
     fn shortcut_keys_exist_in_schema() {
         for (key, _) in BINDINGS {
-            assert!(
-                schema_template::has_key("@APP_SCHEMA_SHORTCUTS_ID@", key),
-                "{key} missing from shortcuts schema"
-            );
+            let found = if TTY_REX_KEYS.contains(key) {
+                tty_rex_shortcuts_block().contains(&format!("<key name=\"{key}\" type=\"s\">"))
+            } else {
+                schema_template::has_key("@APP_SCHEMA_SHORTCUTS_ID@", key)
+            };
+            assert!(found, "{key} missing from its shortcuts schema");
+        }
+    }
+
+    #[test]
+    fn tty_rex_keys_match_schema() {
+        let block = tty_rex_shortcuts_block();
+        assert_eq!(block.matches("<key name=").count(), TTY_REX_KEYS.len());
+        for key in TTY_REX_KEYS {
+            assert!(!ALL_KEYS.contains(key), "{key} shadows a Ptyxis shortcut");
         }
     }
 
@@ -427,6 +523,7 @@ mod tests {
             ),
             (key::SEARCH, SearchAction::action_name()),
             (key::SET_TITLE, SetTitleAction::action_name()),
+            (key::TOGGLE_TELEMETRY, ToggleTelemetryAction::action_name()),
             (key::TAB_OVERVIEW, TabOverviewAction::action_name()),
             (key::ZOOM_IN, ZoomInAction::action_name()),
             (key::ZOOM_ONE, ZoomOneAction::action_name()),
@@ -458,7 +555,7 @@ mod tests {
             .flat_map(|(_, rows)| rows.iter().map(|row| row.key))
             .collect();
         listed.sort_unstable();
-        let mut all = ALL_KEYS.to_vec();
+        let mut all = [ALL_KEYS, TTY_REX_KEYS].concat();
         all.sort_unstable();
         assert_eq!(listed, all);
     }
@@ -475,6 +572,50 @@ mod tests {
         ];
         for (key, expected) in cases {
             assert_eq!(default_accelerator(key).as_deref(), expected, "{key}");
+        }
+    }
+
+    #[test]
+    fn tty_rex_defaults_do_not_collide() {
+        if settings::tests::expected_schema(config::SHORTCUTS_SCHEMA_ID).is_none()
+            || settings::tests::expected_schema(config::TTY_REX_SHORTCUTS_SCHEMA_ID).is_none()
+        {
+            return;
+        }
+        assert_eq!(
+            default_accelerator(key::TOGGLE_TELEMETRY).as_deref(),
+            Some("<ctrl><shift>m")
+        );
+        // Parsing accelerators needs GTK initialized, so compare the
+        // schema strings, which spell modifiers the same way.
+        let normalized = |key: &str| {
+            default_accelerator(key)
+                .as_deref()
+                .and_then(effective_accel)
+                .map(|accel| accel.to_ascii_lowercase().replace("<control>", "<ctrl>"))
+        };
+        for key in TTY_REX_KEYS {
+            let ours = normalized(key).expect("tty-rex shortcuts have a default");
+            for other in ALL_KEYS.iter().chain(TTY_REX_KEYS).filter(|k| *k != key) {
+                assert_ne!(
+                    normalized(other).as_ref(),
+                    Some(&ours),
+                    "{key} collides with {other}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keys_map_to_their_schema() {
+        if settings::tests::expected_schema(config::TTY_REX_SHORTCUTS_SCHEMA_ID).is_none() {
+            return;
+        }
+        settings::use_memory_backend();
+        let settings = open_settings().unwrap();
+        for (key, _) in BINDINGS {
+            let schema = settings.for_key(key).settings_schema().unwrap();
+            assert!(schema.has_key(key), "{key}");
         }
     }
 
