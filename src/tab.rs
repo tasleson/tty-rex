@@ -23,6 +23,10 @@
 //! Tabs locate their `adw::TabPage` through the widget hierarchy instead of
 //! reporting to a particular window, because pages can be dragged between
 //! windows; whichever window currently hosts the tab is the right one.
+//!
+//! A tab can be given a color, shown as a dot on the tab and painted on the
+//! window's top bar while the tab is selected. This is a tty-rex addition
+//! with no C equivalent; the color lasts as long as the tab.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -34,6 +38,7 @@ use relm4::actions::RelmAction;
 use relm4::prelude::*;
 use vte::prelude::*;
 
+use crate::color_dialog;
 use crate::dressing::{Dressing, DressingStyle};
 use crate::inspector::{Inspector, InspectorInit};
 use crate::leader::{self, LeaderKind};
@@ -54,6 +59,15 @@ const RESTART_LABEL: &str = "_Restart";
 const EDIT_PROFILE_LABEL: &str = "Edit Profile";
 /// Application action opening the profile editor (`app.edit-profile`).
 pub const EDIT_PROFILE_ACTION: &str = "app.edit-profile";
+
+/// Title of the color dialog and tooltip of the color dot.
+const TAB_COLOR_TITLE: &str = "Tab Color";
+/// The color dot on the tab: a circle of `COLOR_DOT_RADIUS` in a square
+/// of `COLOR_DOT_SIZE`, outlined so it stays visible on a top bar painted
+/// in the same color.
+const COLOR_DOT_SIZE: u32 = 16;
+const COLOR_DOT_RADIUS: f64 = 6.0;
+const COLOR_DOT_OUTLINE_WIDTH: f64 = 1.0;
 
 /// Poll delays of `src/ptyxis-tab-monitor.c`: soon after keys that likely
 /// start or end a program, otherwise backing off while nothing changes.
@@ -151,6 +165,41 @@ pub fn compose_title(
         TabState::Initial | TabState::Spawning | TabState::Running => {}
     }
     title
+}
+
+/// `#rrggbb` for the opaque part of `color`.
+fn hex_color(color: &gdk::RGBA) -> String {
+    // Clamped first, so the cast cannot saturate.
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        channel(color.red()),
+        channel(color.green()),
+        channel(color.blue())
+    )
+}
+
+/// An SVG of the dot marking a tab colored `color`, outlined in the text
+/// color used on it.
+pub fn color_dot_svg(color: &gdk::RGBA) -> String {
+    let outline = palette::contrast_foreground(color);
+    let center = f64::from(COLOR_DOT_SIZE) / 2.0;
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{size}\" height=\"{size}\" \
+         viewBox=\"0 0 {size} {size}\"><circle cx=\"{center}\" cy=\"{center}\" \
+         r=\"{COLOR_DOT_RADIUS}\" fill=\"{fill}\" stroke=\"{stroke}\" \
+         stroke-opacity=\"{opacity}\" stroke-width=\"{COLOR_DOT_OUTLINE_WIDTH}\"/></svg>",
+        size = COLOR_DOT_SIZE,
+        fill = hex_color(color),
+        stroke = hex_color(&outline),
+        opacity = outline.alpha(),
+    )
+}
+
+/// The dot as an icon. It is not symbolic, so the tab bar shows it in
+/// color rather than recoloring it like its other icons.
+fn color_dot_icon(color: &gdk::RGBA) -> gio::Icon {
+    gio::BytesIcon::new(&glib::Bytes::from_owned(color_dot_svg(color).into_bytes())).upcast()
 }
 
 /// Whether a key press likely starts or ends a program, so the leader
@@ -320,6 +369,8 @@ pub struct TabInit {
     pub previous_cwd_uri: Option<String>,
     pub title_prefix: Option<String>,
     pub zoom: Rc<Cell<ZoomLevel>>,
+    /// The tab's color, shared with windows for the tab menu.
+    pub color: Rc<Cell<Option<gdk::RGBA>>>,
     pub grid_size: Option<(u32, u32)>,
 }
 
@@ -351,6 +402,11 @@ pub enum TabInput {
     SetIncludeProcessTitle(bool),
     /// Carries the serial of the dialog that closed.
     TitleDialogClosed(u32),
+    ShowColorDialog,
+    /// The color dialog with this serial closed, with the picked color
+    /// unless it was dismissed or cancelled.
+    ColorDialogClosed(u32, Option<gdk::RGBA>),
+    ResetColor,
     /// The tab left its window, e.g. to move to another one.
     Unrealized,
 }
@@ -382,6 +438,13 @@ pub struct Tab {
     /// Identifies the current title dialog, so a late "closed" message from
     /// a dialog that was force-closed cannot clear its successor.
     title_dialog_serial: u32,
+    /// The color given to the tab, and the dot showing it on the page.
+    color: Rc<Cell<Option<gdk::RGBA>>>,
+    color_icon: Option<gio::Icon>,
+    /// Cancels the open color dialog.
+    color_dialog: Option<gio::Cancellable>,
+    /// Identifies the current color dialog, like `title_dialog_serial`.
+    color_dialog_serial: u32,
     leader_kind: LeaderKind,
     /// Foreground process group seen by the last check.
     leader_pgrp: Option<i32>,
@@ -415,7 +478,61 @@ impl Tab {
             visual_process_leader: self.app_settings.visual_process_leader(),
             highlight_colors: self.app_settings.highlight_colors(),
             use_system_accent: palette.use_system_accent(),
+            tab_color: self.color.get(),
         });
+    }
+
+    /// Shows the color dot on the page.
+    fn update_color_indicator(&self, root: &gtk::Box) {
+        let Some((_, page)) = find_page(root) else {
+            return;
+        };
+        let wanted = self.color_icon.as_ref();
+        if page.indicator_icon().as_ref() != wanted {
+            page.set_indicator_icon(wanted);
+            page.set_indicator_tooltip(if wanted.is_some() {
+                TAB_COLOR_TITLE
+            } else {
+                ""
+            });
+        }
+    }
+
+    fn set_color(&mut self, color: Option<gdk::RGBA>) {
+        if self.color.get() == color {
+            return;
+        }
+        self.color.set(color);
+        self.color_icon = color.as_ref().map(color_dot_icon);
+        self.update_dressing();
+    }
+
+    /// Opens the color dialog, unless it is open already.
+    fn show_color_dialog(&mut self, root: &gtk::Box, sender: &ComponentSender<Self>) {
+        if self.color_dialog.is_some() {
+            return;
+        }
+        self.color_dialog_serial = self.color_dialog_serial.wrapping_add(1);
+        let serial = self.color_dialog_serial;
+        let cancellable = gio::Cancellable::new();
+        let closed = sender.input_sender().clone();
+        color_dialog::choose(
+            &color_dialog::new(TAB_COLOR_TITLE),
+            root.root().and_downcast_ref::<gtk::Window>(),
+            self.color.get().as_ref(),
+            Some(&cancellable),
+            "tab color",
+            // The tab may be gone by now, in which case this is dropped.
+            move |color| closed.emit(TabInput::ColorDialogClosed(serial, color)),
+        );
+        self.color_dialog = Some(cancellable);
+    }
+
+    /// Closes the color dialog without changing the color.
+    fn cancel_color_dialog(&mut self) {
+        if let Some(cancellable) = self.color_dialog.take() {
+            cancellable.cancel();
+        }
     }
 
     /// Shows the leader's or the container's icon on the page, as
@@ -705,6 +822,10 @@ impl Component for Tab {
             inspector: None,
             title_dialog: None,
             title_dialog_serial: 0,
+            color: init.color,
+            color_icon: None,
+            color_dialog: None,
+            color_dialog_serial: 0,
             leader_kind: LeaderKind::Unknown,
             leader_pgrp: None,
             leader_monitor,
@@ -839,23 +960,35 @@ impl Component for Tab {
                     self.title_dialog = None;
                 }
             }
+            TabInput::ShowColorDialog => self.show_color_dialog(root, &sender),
+            TabInput::ColorDialogClosed(serial, color) => {
+                if serial == self.color_dialog_serial {
+                    self.color_dialog = None;
+                    if color.is_some() {
+                        self.set_color(color);
+                    }
+                }
+            }
+            TabInput::ResetColor => self.set_color(None),
             TabInput::Unrealized => {
                 // A tab moved to another window (e.g. by the detach-tab
                 // shortcut, which the dialog does not block) would leave its
                 // dialog on the old window, which may never report "closed"
-                // once destroyed.
+                // once destroyed. The color dialog goes for the same reason.
                 if let Some(dialog) = self.title_dialog.take() {
                     dialog.force_close();
                 }
+                self.cancel_color_dialog();
             }
             TabInput::Focus => {
                 self.terminal.grab_focus();
             }
         }
-        // Title and icon depend on state and settings, so refresh after
+        // Title and icons depend on state and settings, so refresh after
         // any change.
         self.update_title(root);
         self.update_icon(root);
+        self.update_color_indicator(root);
     }
 
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
@@ -867,6 +1000,7 @@ impl Component for Tab {
         if let Some(dialog) = self.title_dialog.take() {
             dialog.force_close();
         }
+        self.cancel_color_dialog();
         for (object, id) in self.shared_handlers.drain(..) {
             object.disconnect(id);
         }
@@ -937,6 +1071,49 @@ mod tests {
                 expected,
                 "{prefix:?}"
             );
+        }
+    }
+
+    #[test]
+    fn color_dots() {
+        let cases = [
+            // (color, fill, outline, outline opacity)
+            (gdk::RGBA::RED, "#ff0000", "#000006", "0.8"),
+            (gdk::RGBA::BLACK, "#000000", "#ffffff", "1"),
+            (gdk::RGBA::WHITE, "#ffffff", "#000006", "0.8"),
+            (
+                gdk::RGBA::new(0.2, 0.4, 0.6, 1.0),
+                "#336699",
+                "#ffffff",
+                "1",
+            ),
+            // Out-of-range channels are clamped.
+            (
+                gdk::RGBA::new(1.5, -0.5, 0.5, 1.0),
+                "#ff0080",
+                "#000006",
+                "0.8",
+            ),
+        ];
+        for (color, fill, outline, opacity) in cases {
+            let svg = color_dot_svg(&color);
+            assert!(
+                svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""),
+                "{svg}"
+            );
+            assert!(svg.ends_with("/></svg>"), "{svg}");
+            for expected in [
+                "width=\"16\" height=\"16\" viewBox=\"0 0 16 16\"".to_owned(),
+                "cx=\"8\" cy=\"8\" r=\"6\"".to_owned(),
+                format!("fill=\"{fill}\""),
+                format!("stroke=\"{outline}\""),
+                format!("stroke-opacity=\"{opacity}\""),
+            ] {
+                assert!(
+                    svg.contains(&expected),
+                    "{color}: missing {expected} in {svg}"
+                );
+            }
         }
     }
 

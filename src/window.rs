@@ -92,6 +92,9 @@ relm4::new_stateless_action!(pub ZoomOutAction, WindowActions, "zoom-out");
 relm4::new_stateless_action!(pub ZoomOneAction, WindowActions, "zoom-one");
 relm4::new_stateless_action!(pub SearchAction, WindowActions, "search");
 relm4::new_stateless_action!(pub SetTitleAction, WindowActions, "set-title");
+// Tab colors are a tty-rex addition, so these have no C counterpart.
+relm4::new_stateless_action!(pub SetTabColorAction, WindowActions, "set-tab-color");
+relm4::new_stateless_action!(pub ResetTabColorAction, WindowActions, "reset-tab-color");
 relm4::new_stateless_action!(pub TabOverviewAction, WindowActions, "tab-overview");
 relm4::new_stateless_action!(pub PreferencesAction, WindowActions, "preferences");
 relm4::new_stateless_action!(
@@ -130,6 +133,8 @@ pub enum WindowInput {
     ShowFind,
     FindDismissed,
     SetTitle,
+    SetTabColor,
+    ResetTabColor,
     ShowPreferences,
     ShowKeyboardShortcuts,
     SelectedPageChanged,
@@ -497,6 +502,15 @@ fn build_tab_menu() -> gio::Menu {
     menu.append_section(None, &section);
     let section = gio::Menu::new();
     section.append_item(&RelmAction::<SetTitleAction>::to_menu_item(SET_TITLE_LABEL));
+    section.append_item(&RelmAction::<SetTabColorAction>::to_menu_item(
+        "Set _Color…",
+    ));
+    let reset_color = RelmAction::<ResetTabColorAction>::to_menu_item("_Reset Color");
+    reset_color.set_attribute_value(
+        HIDDEN_WHEN_ATTRIBUTE,
+        Some(&HIDDEN_WHEN_ACTION_DISABLED.to_variant()),
+    );
+    section.append_item(&reset_color);
     menu.append_section(None, &section);
     let section = gio::Menu::new();
     section.append_item(&RelmAction::<CloseOtherTabsAction>::to_menu_item(
@@ -570,13 +584,6 @@ impl Component for Window {
         // Our own GSettings-driven shortcuts replace libadwaita's defaults.
         tab_view.set_shortcuts(adw::TabViewShortcuts::empty());
         tab_view.set_menu_model(Some(&build_tab_menu()));
-        // The tab menu acts on the selected tab, so select the one it was
-        // opened for (`ptyxis_window_setup_menu_cb()`).
-        tab_view.connect_setup_menu(|tab_view, page| {
-            if let Some(page) = page {
-                tab_view.set_selected_page(page);
-            }
-        });
 
         let tab_bar = adw::TabBar::builder()
             .view(&tab_view)
@@ -714,6 +721,27 @@ impl Component for Window {
         add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset);
         add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
         add_action::<SetTitleAction>(&window, &sender, || WindowInput::SetTitle);
+        add_action::<SetTabColorAction>(&window, &sender, || WindowInput::SetTabColor);
+        let reset_color =
+            add_action::<ResetTabColorAction>(&window, &sender, || WindowInput::ResetTabColor);
+        // The tab menu acts on the selected tab, so select the one it was
+        // opened for (`ptyxis_window_setup_menu_cb()`). Both the tab bar and
+        // the overview open the menu through here, so it is also where
+        // "Reset Color" is offered only for a tab that has a color; when
+        // run otherwise (D-Bus), resetting a tab without one does nothing.
+        reset_color.set_enabled(false);
+        let weak_app = Rc::downgrade(&app);
+        tab_view.connect_setup_menu(move |tab_view, page| {
+            let Some(page) = page else {
+                return;
+            };
+            tab_view.set_selected_page(page);
+            let has_color = weak_app
+                .upgrade()
+                .and_then(|app| app.tab(&page.child()))
+                .is_some_and(|tab| tab.color.get().is_some());
+            reset_color.set_enabled(has_color);
+        });
         add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
         add_action::<PreferencesAction>(&window, &sender, || WindowInput::ShowPreferences);
         add_action::<ShowKeyboardShortcutsAction>(&window, &sender, || {
@@ -851,6 +879,8 @@ impl Component for Window {
                 }
             }
             WindowInput::SetTitle => self.send_to_active_tab(TabInput::ShowTitleDialog),
+            WindowInput::SetTabColor => self.send_to_active_tab(TabInput::ShowColorDialog),
+            WindowInput::ResetTabColor => self.send_to_active_tab(TabInput::ResetColor),
             WindowInput::ShowPreferences => {
                 self.app.show_preferences(Some(self.window.upcast_ref()));
             }

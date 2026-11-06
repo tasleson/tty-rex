@@ -29,6 +29,9 @@
 //!
 //! Colors that the C CSS computes with GTK's `mix()` and `alpha()` are
 //! computed here instead, since those functions are deprecated.
+//!
+//! A color the user gives a tab paints the top bar like a leader
+//! highlight. This is a tty-rex addition; Ptyxis has no tab colors.
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -66,6 +69,9 @@ pub struct DressingStyle<'a> {
     pub visual_process_leader: bool,
     pub highlight_colors: HighlightColors,
     pub use_system_accent: bool,
+    /// Color the user gave the tab (a tty-rex addition), painting the top
+    /// bar unless a leader highlight does.
+    pub tab_color: Option<gdk::RGBA>,
 }
 
 fn with_alpha(color: &gdk::RGBA, alpha: f64) -> gdk::RGBA {
@@ -178,11 +184,14 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
         LeaderKind::Unknown | LeaderKind::Container => None,
     }
     .map(|(scarf, chosen)| chosen.map_or(scarf, Scarf::on_background));
-    match leader {
+    // The leader highlight warns about the shell, so it outranks the tab
+    // color, which in turn is painted like a highlight.
+    let top_bar_scarf = leader.or_else(|| style.tab_color.map(Scarf::on_background));
+    match top_bar_scarf {
         // Header bars in a top bar are transparent, so this covers them.
         Some(scarf) => rule(&mut css, &top_bar, &scarf.foreground, &scarf.background),
         // The highlight outranks the backdrop fade in the C rules, so the
-        // fade only applies without one.
+        // fade only applies without one (or a tab color).
         None => rule(
             &mut css,
             &format!("{window}:backdrop toolbarview.{WINDOW_CONTENTS_CLASS} > revealer.top-bar"),
@@ -307,6 +316,7 @@ mod tests {
             visual_process_leader: true,
             highlight_colors: HighlightColors::default(),
             use_system_accent: false,
+            tab_color: None,
         }
     }
 
@@ -521,6 +531,59 @@ mod tests {
         );
         assert!(css.contains(BACKDROP), "{css}");
         assert!(!css.contains(&red.to_str().to_string()), "{css}");
+    }
+
+    #[test]
+    fn tab_color() {
+        let face = face();
+        let (teal, red) = (gdk::RGBA::new(0.1, 0.6, 0.6, 1.0), gdk::RGBA::RED);
+        let chosen = HighlightColors {
+            superuser: Some(red),
+            remote: None,
+        };
+        let cases = [
+            // (leader, highlighting enabled, chosen highlights, top bar)
+            (LeaderKind::Unknown, true, None, Scarf::on_background(teal)),
+            (
+                LeaderKind::Container,
+                true,
+                None,
+                Scarf::on_background(teal),
+            ),
+            (LeaderKind::Superuser, true, None, face.superuser),
+            (LeaderKind::Remote, true, None, face.remote),
+            (
+                LeaderKind::Superuser,
+                true,
+                Some(chosen),
+                Scarf::on_background(red),
+            ),
+            // Without the highlight the tab color shows even under sudo.
+            (
+                LeaderKind::Superuser,
+                false,
+                None,
+                Scarf::on_background(teal),
+            ),
+        ];
+        for (leader, enabled, highlights, scarf) in cases {
+            let css = dressing_css(
+                CLASS,
+                &DressingStyle {
+                    leader,
+                    visual_process_leader: enabled,
+                    highlight_colors: highlights.unwrap_or_default(),
+                    tab_color: Some(teal),
+                    ..style(&face)
+                },
+            );
+            let context = format!("{leader:?} enabled={enabled} {highlights:?}");
+            let expected = rule_for(TOP_BAR, &scarf.foreground, &scarf.background);
+            assert!(css.contains(&expected), "{context}: {css}");
+            // The tab color, like a highlight, outranks the backdrop fade.
+            assert!(!css.contains(BACKDROP), "{context}: {css}");
+            assert!(!css.contains(WINDOW_HANDLE), "{context}: {css}");
+        }
     }
 
     #[test]

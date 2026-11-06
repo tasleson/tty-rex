@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use relm4::actions::{ActionName, RelmAction};
 use relm4::prelude::*;
 
@@ -76,6 +76,7 @@ struct TabHandle {
     terminal: vte::Terminal,
     profile_uuid: String,
     zoom: Rc<Cell<ZoomLevel>>,
+    color: Rc<Cell<Option<gdk::RGBA>>>,
     css_class: String,
 }
 
@@ -85,6 +86,8 @@ pub struct TabRef {
     pub terminal: vte::Terminal,
     pub profile_uuid: String,
     pub zoom: Rc<Cell<ZoomLevel>>,
+    /// The color the user gave the tab, if any.
+    pub color: Rc<Cell<Option<gdk::RGBA>>>,
     /// Added to the window while the tab is selected (see `Tab::css_class`).
     pub css_class: String,
 }
@@ -274,6 +277,7 @@ impl App {
         let profile = self.profiles.profile(request.profile_uuid.as_deref())?;
         let profile_uuid = profile.uuid().to_owned();
         let zoom = Rc::new(Cell::new(request.zoom));
+        let color = Rc::new(Cell::new(None));
         let controller = Tab::builder()
             .launch(TabInit {
                 profile,
@@ -284,6 +288,7 @@ impl App {
                 previous_cwd_uri: request.previous_cwd_uri,
                 title_prefix: request.title_prefix,
                 zoom: Rc::clone(&zoom),
+                color: Rc::clone(&color),
                 grid_size: request.grid_size,
             })
             .detach();
@@ -297,6 +302,7 @@ impl App {
                 terminal,
                 profile_uuid,
                 zoom,
+                color,
                 css_class,
             },
         );
@@ -309,6 +315,7 @@ impl App {
             terminal: handle.terminal.clone(),
             profile_uuid: handle.profile_uuid.clone(),
             zoom: Rc::clone(&handle.zoom),
+            color: Rc::clone(&handle.color),
             css_class: handle.css_class.clone(),
         })
     }
