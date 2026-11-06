@@ -65,6 +65,10 @@ const SUPERUSER_BASE_INDEX: usize = 1;
 /// Indexed color (yellow) the visual bell derives from.
 const BELL_BASE_INDEX: usize = 11;
 const REMOTE_BASE_INDEX: usize = 12;
+/// Text put on a background that does not come with its own text color,
+/// matching libadwaita's window foreground for dark and light styles.
+const LIGHT_TEXT: gdk::RGBA = gdk::RGBA::WHITE;
+const DARK_TEXT: gdk::RGBA = gdk::RGBA::new(0.0, 0.0, 6.0 / 255.0, 0.8);
 
 #[derive(Debug, thiserror::Error)]
 pub enum PaletteError {
@@ -97,6 +101,25 @@ pub enum PaletteError {
 pub struct Scarf {
     pub foreground: gdk::RGBA,
     pub background: gdk::RGBA,
+}
+
+impl Scarf {
+    /// A scarf on `background` whose text color is picked for contrast.
+    pub fn on_background(background: gdk::RGBA) -> Self {
+        Self {
+            foreground: contrast_foreground(&background),
+            background,
+        }
+    }
+}
+
+/// Highlight backgrounds chosen in the preferences, replacing the
+/// palette's own (see `settings::tty_rex_key`). The text color is then
+/// picked for contrast, and the same color serves light and dark styles.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HighlightColors {
+    pub superuser: Option<gdk::RGBA>,
+    pub remote: Option<gdk::RGBA>,
 }
 
 /// The colors for one appearance (light or dark).
@@ -133,6 +156,15 @@ pub fn is_dark(color: &gdk::RGBA) -> bool {
     let [r, g, b] = [color.red(), color.green(), color.blue()].map(|c| f64::from(c) * 255.0);
     let hsp = (0.299 * r * r + 0.587 * g * g + 0.114 * b * b).sqrt();
     hsp <= 127.5
+}
+
+/// A text color legible on `background`: light on dark, dark on light.
+pub fn contrast_foreground(background: &gdk::RGBA) -> gdk::RGBA {
+    if is_dark(background) {
+        LIGHT_TEXT
+    } else {
+        DARK_TEXT
+    }
 }
 
 /// Converts to hue (degrees), saturation and lightness, as
@@ -922,6 +954,29 @@ mod tests {
         ];
         for (color, dark) in cases {
             assert_eq!(is_dark(&gdk::RGBA::parse(color).unwrap()), dark, "{color}");
+        }
+    }
+
+    #[test]
+    fn contrasting_scarves() {
+        let cases = [
+            ("#000000", LIGHT_TEXT),
+            ("#ffffff", DARK_TEXT),
+            ("#c01c28", LIGHT_TEXT),
+            ("#1c71d8", LIGHT_TEXT),
+            ("#f6d32d", DARK_TEXT),
+            ("#8ff0a4", DARK_TEXT),
+        ];
+        for (background, foreground) in cases {
+            let background = rgba(background);
+            assert_eq!(contrast_foreground(&background), foreground, "{background}");
+            assert_eq!(
+                Scarf::on_background(background),
+                Scarf {
+                    foreground,
+                    background
+                }
+            );
         }
     }
 }

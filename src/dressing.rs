@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use gtk::gdk;
 
 use crate::leader::LeaderKind;
-use crate::palette::{self, Face, Scarf};
+use crate::palette::{self, Face, HighlightColors, Scarf};
 use crate::window::{VISUAL_BELL_CLASS, WINDOW_CONTENTS_CLASS};
 
 /// Prefix of the CSS class that marks the window showing a given tab.
@@ -64,6 +64,7 @@ pub struct DressingStyle<'a> {
     /// Process leading the terminal, highlighted when `visual_process_leader`.
     pub leader: LeaderKind,
     pub visual_process_leader: bool,
+    pub highlight_colors: HighlightColors,
     pub use_system_accent: bool,
 }
 
@@ -169,12 +170,14 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
         );
     }
 
-    let leader: Option<&Scarf> = match style.leader {
+    let highlights = &style.highlight_colors;
+    let leader: Option<Scarf> = match style.leader {
         _ if !style.visual_process_leader => None,
-        LeaderKind::Superuser => Some(&face.superuser),
-        LeaderKind::Remote => Some(&face.remote),
+        LeaderKind::Superuser => Some((face.superuser, highlights.superuser)),
+        LeaderKind::Remote => Some((face.remote, highlights.remote)),
         LeaderKind::Unknown | LeaderKind::Container => None,
-    };
+    }
+    .map(|(scarf, chosen)| chosen.map_or(scarf, Scarf::on_background));
     match leader {
         // Header bars in a top bar are transparent, so this covers them.
         Some(scarf) => rule(&mut css, &top_bar, &scarf.foreground, &scarf.background),
@@ -302,6 +305,7 @@ mod tests {
             opacity: 1.0,
             leader: LeaderKind::Unknown,
             visual_process_leader: true,
+            highlight_colors: HighlightColors::default(),
             use_system_accent: false,
         }
     }
@@ -459,6 +463,64 @@ mod tests {
                 None => assert!(css.contains(BACKDROP), "{context}: {css}"),
             }
         }
+    }
+
+    #[test]
+    fn chosen_highlight_colors() {
+        let face = face();
+        let (red, yellow) = (gdk::RGBA::RED, gdk::RGBA::new(1.0, 0.9, 0.2, 1.0));
+        let chosen = HighlightColors {
+            superuser: Some(red),
+            remote: Some(yellow),
+        };
+        let only_superuser = HighlightColors {
+            superuser: Some(red),
+            remote: None,
+        };
+        let cases = [
+            (
+                LeaderKind::Superuser,
+                chosen,
+                Some(Scarf::on_background(red)),
+            ),
+            (
+                LeaderKind::Remote,
+                chosen,
+                Some(Scarf::on_background(yellow)),
+            ),
+            (LeaderKind::Remote, only_superuser, Some(face.remote)),
+            (LeaderKind::Container, chosen, None),
+        ];
+        for (leader, highlight_colors, scarf) in cases {
+            let css = dressing_css(
+                CLASS,
+                &DressingStyle {
+                    leader,
+                    highlight_colors,
+                    ..style(&face)
+                },
+            );
+            let context = format!("{leader:?} {highlight_colors:?}");
+            match scarf {
+                Some(scarf) => {
+                    let expected = rule_for(TOP_BAR, &scarf.foreground, &scarf.background);
+                    assert!(css.contains(&expected), "{context}: {css}");
+                }
+                None => assert!(css.contains(BACKDROP), "{context}: {css}"),
+            }
+        }
+        // Chosen colors still only show while highlighting is enabled.
+        let css = dressing_css(
+            CLASS,
+            &DressingStyle {
+                leader: LeaderKind::Superuser,
+                visual_process_leader: false,
+                highlight_colors: chosen,
+                ..style(&face)
+            },
+        );
+        assert!(css.contains(BACKDROP), "{css}");
+        assert!(!css.contains(&red.to_str().to_string()), "{css}");
     }
 
     #[test]

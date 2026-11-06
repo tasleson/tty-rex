@@ -333,6 +333,8 @@ pub enum TabInput {
     PollLeader,
     UpdateTitle,
     AppSettingsChanged,
+    /// A highlight color in tty-rex's own settings changed.
+    HighlightColorsChanged,
     ProfileChanged,
     AppearanceChanged,
     Bell,
@@ -398,7 +400,7 @@ impl Tab {
     }
 
     /// Restyles the window for the current palette, appearance, opacity,
-    /// leader and `visual-process-leader` setting.
+    /// leader, `visual-process-leader` setting and highlight colors.
     fn update_dressing(&mut self) {
         let palette_id = self.profile.palette_id();
         let Some(palette) = palette::lookup_or_default(&palette_id) else {
@@ -411,6 +413,7 @@ impl Tab {
             opacity: self.profile.opacity(),
             leader: self.leader_kind,
             visual_process_leader: self.app_settings.visual_process_leader(),
+            highlight_colors: self.app_settings.highlight_colors(),
             use_system_accent: palette.use_system_accent(),
         });
     }
@@ -649,6 +652,12 @@ impl Component for Tab {
             .gsettings()
             .connect_changed(None, move |_, _| input.emit(TabInput::AppSettingsChanged));
         shared_handlers.push((init.app_settings.gsettings().clone().upcast(), id));
+        let input = sender.input_sender().clone();
+        let tty_rex_settings = init.app_settings.tty_rex_gsettings();
+        let id = tty_rex_settings.connect_changed(None, move |_, _| {
+            input.emit(TabInput::HighlightColorsChanged)
+        });
+        shared_handlers.push((tty_rex_settings.clone().upcast(), id));
         if let Some(desktop) = init.app_settings.desktop_settings() {
             let input = sender.input_sender().clone();
             let id = desktop
@@ -752,6 +761,7 @@ impl Component for Tab {
                     }
                 }
             }
+            TabInput::HighlightColorsChanged => self.update_dressing(),
             TabInput::ProfileChanged => {
                 terminal::apply_profile(&self.terminal, &self.profile);
                 terminal::apply_profile_palette(&self.terminal, &self.profile);

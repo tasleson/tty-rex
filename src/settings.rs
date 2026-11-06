@@ -31,6 +31,7 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 
 use crate::config;
+use crate::palette::HighlightColors;
 
 /// Keys of the `org.gnome.Ptyxis` schema used by the port.
 pub mod key {
@@ -444,6 +445,14 @@ impl AppSettings {
     /// Whether the tty-rex color setting `key` holds anything, valid or not.
     pub fn has_color_override(&self, key: &str) -> bool {
         !self.tty_rex.string(key).trim().is_empty()
+    }
+
+    /// The chosen superuser and remote highlight backgrounds.
+    pub fn highlight_colors(&self) -> HighlightColors {
+        HighlightColors {
+            superuser: self.color_override(tty_rex_key::SUPERUSER_HIGHLIGHT_COLOR),
+            remote: self.color_override(tty_rex_key::REMOTE_HIGHLIGHT_COLOR),
+        }
     }
 
     /// Stores `color` in the tty-rex color setting `key`; `None` goes back
