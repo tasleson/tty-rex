@@ -792,7 +792,7 @@ impl Component for Preferences {
                 let Some(settings) = &self.shortcut_settings else {
                     return;
                 };
-                let settings = settings.for_key(key).clone();
+                let settings = settings.clone();
                 let dialog = AccelDialog::builder()
                     .launch(AccelDialogInit {
                         title: title.to_owned(),

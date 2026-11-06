@@ -30,7 +30,7 @@
 //! the terminal, and are rebuilt whenever the settings change.
 
 use gtk::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 
 use crate::config;
 use crate::settings::{self, SettingsError};
@@ -332,6 +332,15 @@ pub const EDITOR_GROUPS: &[ShortcutGroup] = &[
     ),
 ];
 
+/// The editor title of the shortcut `key`, e.g. "Search History".
+pub fn title(key: &str) -> Option<&'static str> {
+    EDITOR_GROUPS
+        .iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .find(|row| row.key == key)
+        .map(|row| row.title)
+}
+
 /// The schema default for a shortcut (`ptyxis_shortcuts_get_default_accelerator()`).
 pub fn default_accelerator(key: &str) -> Option<String> {
     settings::lookup_schema(schema_of(key).0)
@@ -357,6 +366,11 @@ impl ShortcutSettings {
         } else {
             &self.ptyxis
         }
+    }
+
+    /// The stored accelerator of the shortcut `key`.
+    pub fn accelerator(&self, key: &str) -> String {
+        self.for_key(key).string(key).into()
     }
 
     fn all(&self) -> [&gio::Settings; 2] {
@@ -386,6 +400,49 @@ pub fn open_settings() -> Result<ShortcutSettings, SettingsError> {
 pub fn effective_accel(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
+}
+
+/// A parsed accelerator, as from `gtk::accelerator_parse()`.
+pub type Accelerator = (gdk::Key, gdk::ModifierType);
+
+/// The keyval and modifiers an accelerator matches, so spellings such as
+/// `<ctrl><shift>M` and `<Control><Shift>m` compare equal.
+fn normalize((key, modifiers): Accelerator) -> Accelerator {
+    let key = match key.to_lower() {
+        gdk::Key::ISO_Left_Tab => gdk::Key::Tab,
+        key => key,
+    };
+    (key, modifiers)
+}
+
+/// The other shortcut, in either schema, already bound to `accel`.
+///
+/// Upstream Ptyxis saves duplicates silently; tty-rex refuses them so
+/// one of the two actions does not quietly stop working. `current`
+/// returns a shortcut's stored value and `parse` is
+/// `gtk::accelerator_parse()`, passed in to keep this testable without a
+/// display. A disabled (empty) `accel` or binding never conflicts, and
+/// `key` itself is skipped, so keeping its current value is fine.
+pub fn find_conflict(
+    key: &str,
+    accel: &str,
+    current: impl Fn(&'static str) -> Option<String>,
+    parse: impl Fn(&str) -> Option<Accelerator>,
+) -> Option<&'static str> {
+    let wanted = effective_accel(accel).and_then(&parse).map(normalize)?;
+    ALL_KEYS
+        .iter()
+        .chain(TTY_REX_KEYS)
+        .copied()
+        .filter(|other| *other != key)
+        .find(|other| {
+            current(other)
+                .as_deref()
+                .and_then(effective_accel)
+                .and_then(&parse)
+                .map(normalize)
+                == Some(wanted)
+        })
 }
 
 /// Shortcut settings plus the controller they populate.
@@ -616,6 +673,87 @@ mod tests {
         for (key, _) in BINDINGS {
             let schema = settings.for_key(key).settings_schema().unwrap();
             assert!(schema.has_key(key), "{key}");
+        }
+    }
+
+    /// Enough of `gtk_accelerator_parse()` for the tests, which have no
+    /// display to initialize GTK with: case-insensitive modifiers and the
+    /// key name as written, leaving case folding to [`find_conflict`].
+    fn parse(accel: &str) -> Option<Accelerator> {
+        let mut modifiers = gdk::ModifierType::empty();
+        let mut rest = accel;
+        while let Some(tag) = rest.strip_prefix('<') {
+            let (name, tail) = tag.split_once('>')?;
+            modifiers |= match name.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" | "primary" => gdk::ModifierType::CONTROL_MASK,
+                "shift" => gdk::ModifierType::SHIFT_MASK,
+                "alt" => gdk::ModifierType::ALT_MASK,
+                _ => return None,
+            };
+            rest = tail;
+        }
+        Some((gdk::Key::from_name(rest)?, modifiers))
+    }
+
+    #[test]
+    fn conflicts() {
+        let bindings = [
+            (key::SEARCH, "<ctrl><shift>f"),
+            (key::TOGGLE_TELEMETRY, "<ctrl><shift>m"),
+            (key::NEW_TAB, "<Control><Shift>t"),
+            (key::MOVE_NEXT_TAB, "<ctrl>Tab"),
+            ("reset", ""),
+            ("select-none", "  "),
+        ];
+        let current = |key: &str| {
+            bindings
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        };
+        let cases = [
+            // Same accelerator, different spelling, across schemas.
+            (
+                key::NEW_TAB,
+                "<Control><Shift>M",
+                Some(key::TOGGLE_TELEMETRY),
+            ),
+            (
+                key::TOGGLE_TELEMETRY,
+                "<Primary><shift>F",
+                Some(key::SEARCH),
+            ),
+            (key::SEARCH, "<ctrl><shift>T", Some(key::NEW_TAB)),
+            // ISO_Left_Tab is Tab.
+            (key::SEARCH, "<ctrl>ISO_Left_Tab", Some(key::MOVE_NEXT_TAB)),
+            // Keeping the current value is not a conflict.
+            (key::TOGGLE_TELEMETRY, "<ctrl><shift>M", None),
+            // Disabling never conflicts, nor do disabled shortcuts.
+            (key::SEARCH, "", None),
+            (key::SEARCH, " ", None),
+            // Different modifiers or keys.
+            (key::SEARCH, "<ctrl>m", None),
+            (key::SEARCH, "<ctrl><shift>n", None),
+            (key::SEARCH, "<alt><shift>m", None),
+            // Unparsable values match nothing.
+            (key::SEARCH, "<bogus>m", None),
+        ];
+        for (key, accel, expected) in cases {
+            assert_eq!(
+                find_conflict(key, accel, current, parse),
+                expected,
+                "{key} {accel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn titles() {
+        assert_eq!(title(key::SEARCH), Some("Search History"));
+        assert_eq!(title(key::TOGGLE_TELEMETRY), Some("Show Telemetry"));
+        assert_eq!(title("no-such-key"), None);
+        for key in ALL_KEYS.iter().chain(TTY_REX_KEYS) {
+            assert!(title(key).is_some(), "{key}");
         }
     }
 

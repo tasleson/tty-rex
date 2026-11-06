@@ -26,11 +26,23 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use relm4::prelude::*;
 
+use crate::shortcuts::{self, ShortcutSettings};
+
 const ENTER_SHORTCUT_IMAGE: &str = "/org/gnome/Ptyxis/icons/enter-keyboard-shortcut.svg";
 const SELECTION_PAGE: &str = "selection";
 const DISPLAY_PAGE: &str = "display";
 /// MacBook "fn" key, ignored like in the C dialog.
 const FN_KEYCODE: u32 = 0x01D8;
+const ERROR_CSS_CLASS: &str = "error";
+
+/// Why an accelerator already bound to the shortcut titled `title` was
+/// refused.
+fn conflict_message(accel: &str, title: &str) -> String {
+    let label = gtk::accelerator_parse(accel)
+        .map(|(key, modifiers)| gtk::accelerator_get_label(key, modifiers).to_string())
+        .unwrap_or_else(|| accel.to_owned());
+    format!("{label} is already used by “{title}”")
+}
 
 /// Outcome of a key press while capturing a shortcut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,12 +130,16 @@ struct CaptureState {
     key: Option<gdk::Key>,
     modifier: gdk::ModifierType,
     first_modifier: Option<gdk::Key>,
+    /// Whether releases may end capturing. Cleared when a refused
+    /// shortcut restarts capturing, so releasing the Enter that pressed
+    /// "Set" does not end it again before any key is pressed.
+    listening: bool,
 }
 
 pub struct AccelDialogInit {
     /// Row title, shown in bold in the prompt.
     pub title: String,
-    pub settings: gio::Settings,
+    pub settings: ShortcutSettings,
     pub key: &'static str,
 }
 
@@ -131,12 +147,14 @@ pub struct AccelDialogInit {
 pub enum AccelDialogInput {
     /// Capture state changed; refresh the stack and buttons.
     Refresh,
+    /// A new accelerator was captured; also clears a conflict error.
+    Captured,
     Set,
     Reset,
 }
 
 pub struct AccelDialog {
-    settings: gio::Settings,
+    settings: ShortcutSettings,
     key: &'static str,
     default_accelerator: Option<String>,
     state: Rc<RefCell<CaptureState>>,
@@ -144,6 +162,7 @@ pub struct AccelDialog {
     shortcut_label: gtk::ShortcutLabel,
     reset_button: gtk::Button,
     set_action: gio::SimpleAction,
+    error_label: gtk::Label,
 }
 
 impl AccelDialog {
@@ -178,8 +197,30 @@ impl AccelDialog {
             .set_visible(editing && !self.equals_default(current.as_deref()));
     }
 
+    /// Saves `accelerator` and closes, unless another shortcut already
+    /// uses it: then the error is shown and capturing starts again.
     fn save(&self, accelerator: &str, root: &adw::Dialog) {
-        if let Err(e) = self.settings.set_string(self.key, accelerator) {
+        let conflict = shortcuts::find_conflict(
+            self.key,
+            accelerator,
+            |key| Some(self.settings.accelerator(key)),
+            |accel| gtk::accelerator_parse(accel),
+        );
+        if let Some(other) = conflict {
+            let title = shortcuts::title(other).unwrap_or(other);
+            self.error_label
+                .set_label(&conflict_message(accelerator, title));
+            self.error_label.set_visible(true);
+            let mut state = self.state.borrow_mut();
+            state.editing = true;
+            state.first_modifier = None;
+            state.listening = false;
+            drop(state);
+            self.refresh();
+            return;
+        }
+        let settings = self.settings.for_key(self.key);
+        if let Err(e) = settings.set_string(self.key, accelerator) {
             glib::g_warning!("tty-rex", "Failed to save shortcut {}: {e}", self.key);
         }
         root.close();
@@ -277,9 +318,23 @@ impl Component for AccelDialog {
         stack.add_named(&selection, Some(SELECTION_PAGE));
         stack.add_named(&display, Some(DISPLAY_PAGE));
 
+        // tty-rex addition: Ptyxis saves duplicate shortcuts silently.
+        let error_label = gtk::Label::builder()
+            .xalign(0.5)
+            .wrap(true)
+            .margin_start(14)
+            .margin_end(14)
+            .margin_bottom(14)
+            .css_classes([ERROR_CSS_CLASS])
+            .visible(false)
+            .build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(&stack);
+        content.append(&error_label);
+
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
-        toolbar.set_content(Some(&stack));
+        toolbar.set_content(Some(&content));
         root.set_child(Some(&toolbar));
 
         let actions = gio::SimpleActionGroup::new();
@@ -293,7 +348,7 @@ impl Component for AccelDialog {
         actions.add_action(&reset_action);
         root.insert_action_group("shortcut", Some(&actions));
 
-        let current = init.settings.string(init.key);
+        let current = init.settings.accelerator(init.key);
         let parsed = (!current.is_empty())
             .then(|| gtk::accelerator_parse(current.as_str()))
             .flatten();
@@ -302,6 +357,7 @@ impl Component for AccelDialog {
             key: parsed.map(|(key, _)| key),
             modifier: parsed.map_or(gdk::ModifierType::empty(), |(_, mods)| mods),
             first_modifier: None,
+            listening: true,
         }));
 
         let keys = gtk::EventControllerKey::new();
@@ -318,6 +374,7 @@ impl Component for AccelDialog {
                 .and_then(|event| event.downcast::<gdk::KeyEvent>().ok())
                 .is_some_and(|event| event.is_modifier());
             let mut capture_state = pressed_state.borrow_mut();
+            capture_state.listening = true;
             if is_modifier {
                 if capture_state.key.is_none() && capture_state.modifier.is_empty() {
                     capture_state.first_modifier = Some(keyval);
@@ -340,7 +397,7 @@ impl Component for AccelDialog {
                     capture_state.key = Some(key);
                     capture_state.modifier = modifier;
                     capture_state.editing = false;
-                    input.emit(AccelDialogInput::Refresh);
+                    input.emit(AccelDialogInput::Captured);
                 }
             }
             glib::Propagation::Stop
@@ -352,7 +409,7 @@ impl Component for AccelDialog {
                 return;
             }
             let mut state = released_state.borrow_mut();
-            if !state.editing {
+            if !state.editing || !state.listening {
                 return;
             }
             let is_modifier = controller
@@ -374,7 +431,7 @@ impl Component for AccelDialog {
         root.add_controller(keys);
 
         let model = AccelDialog {
-            default_accelerator: crate::shortcuts::default_accelerator(init.key),
+            default_accelerator: shortcuts::default_accelerator(init.key),
             settings: init.settings,
             key: init.key,
             state,
@@ -382,6 +439,7 @@ impl Component for AccelDialog {
             shortcut_label,
             reset_button,
             set_action,
+            error_label,
         };
         model.refresh();
         // Focus the accept button once a shortcut is captured, as in C.
@@ -399,6 +457,10 @@ impl Component for AccelDialog {
     fn update(&mut self, message: Self::Input, _sender: ComponentSender<Self>, root: &Self::Root) {
         match message {
             AccelDialogInput::Refresh => self.refresh(),
+            AccelDialogInput::Captured => {
+                self.error_label.set_visible(false);
+                self.refresh();
+            }
             AccelDialogInput::Set => {
                 let accelerator = self.accelerator().unwrap_or_default();
                 self.save(&accelerator, root);

@@ -34,6 +34,10 @@ with the network (TCP only), CPU and memory use of the processes started
 from the selected tab. It reads `/proc` and the kernel's socket
 diagnostics, which need no privileges.
 
+Also unlike Ptyxis, the "Set Shortcut" dialog in the preferences refuses
+a combination another shortcut already uses, in either the Ptyxis or the
+tty-rex schema, and names that shortcut instead of saving a duplicate.
+
 ## Trying it safely
 
 Because the preferences window writes your real Ptyxis and tty-rex
