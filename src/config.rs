@@ -51,6 +51,9 @@ pub const SHORTCUTS_SCHEMA_PATH: &str = "/org/gnome/Ptyxis/Shortcuts/";
 /// does not follow a `TTY_REX_APP_ID` override, so every build shares them.
 pub const TTY_REX_SCHEMA_ID: &str = "io.github.tasleson.TtyRex";
 pub const TTY_REX_SCHEMA_PATH: &str = "/io/github/tasleson/TtyRex/";
+/// Shortcuts for tty-rex's own actions, laid out like [`SHORTCUTS_SCHEMA_ID`].
+pub const TTY_REX_SHORTCUTS_SCHEMA_ID: &str = "io.github.tasleson.TtyRex.Shortcuts";
+pub const TTY_REX_SHORTCUTS_SCHEMA_PATH: &str = "/io/github/tasleson/TtyRex/Shortcuts/";
 
 /// Resource base path, matching the C application's.
 pub const RESOURCE_BASE_PATH: &str = "/org/gnome/Ptyxis";
@@ -85,8 +88,13 @@ mod tests {
     }
 
     #[test]
-    fn tty_rex_path_matches_id() {
-        let from_id = format!("/{}/", TTY_REX_SCHEMA_ID.replace('.', "/"));
-        assert_eq!(TTY_REX_SCHEMA_PATH, from_id);
+    fn tty_rex_paths_match_ids() {
+        for (id, path) in [
+            (TTY_REX_SCHEMA_ID, TTY_REX_SCHEMA_PATH),
+            (TTY_REX_SHORTCUTS_SCHEMA_ID, TTY_REX_SHORTCUTS_SCHEMA_PATH),
+        ] {
+            assert_eq!(path, format!("/{}/", id.replace('.', "/")));
+        }
+        assert!(TTY_REX_SHORTCUTS_SCHEMA_PATH.starts_with(TTY_REX_SCHEMA_PATH));
     }
 }

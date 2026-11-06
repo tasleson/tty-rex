@@ -22,6 +22,24 @@
       <description>Window highlight background while a remote process such as ssh leads the terminal, as a CSS color; alpha is ignored. Empty uses the palette's color.</description>
     </key>
 
+    <key name="telemetry-interval" type="u">
+      <range min="1" max="60"/>
+      <default>2</default>
+      <summary>Telemetry Update Interval</summary>
+      <description>Seconds between updates of the telemetry footer's network, CPU and memory readings.</description>
+    </key>
+
+  </schema>
+
+  <!-- Shortcuts for tty-rex actions that org.gnome.Ptyxis.Shortcuts lacks,
+       in the same accelerator format. -->
+  <schema id="io.github.tasleson.TtyRex.Shortcuts" path="/io/github/tasleson/TtyRex/Shortcuts/">
+
+    <key name="toggle-telemetry" type="s">
+      <default>'&lt;ctrl&gt;&lt;shift&gt;m'</default>
+      <summary>Toggle the telemetry footer</summary>
+    </key>
+
   </schema>
 
 </schemalist>

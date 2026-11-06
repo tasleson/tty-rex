@@ -771,8 +771,10 @@ impl Component for Tab {
         shared_handlers.push((init.app_settings.gsettings().clone().upcast(), id));
         let input = sender.input_sender().clone();
         let tty_rex_settings = init.app_settings.tty_rex_gsettings();
-        let id = tty_rex_settings.connect_changed(None, move |_, _| {
-            input.emit(TabInput::HighlightColorsChanged)
+        let id = tty_rex_settings.connect_changed(None, move |_, key| {
+            if settings::tty_rex_key::COLOR_KEYS.contains(&key) {
+                input.emit(TabInput::HighlightColorsChanged)
+            }
         });
         shared_handlers.push((tty_rex_settings.clone().upcast(), id));
         if let Some(desktop) = init.app_settings.desktop_settings() {

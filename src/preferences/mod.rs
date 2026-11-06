@@ -673,8 +673,10 @@ impl Component for Preferences {
         shared_handlers.push((gsettings.clone().upcast(), id));
         let tty_rex_settings = init.settings.tty_rex_gsettings().clone();
         let changed = input.clone();
-        let id = tty_rex_settings.connect_changed(None, move |_, _| {
-            changed.emit(PreferencesInput::HighlightColorsChanged)
+        let id = tty_rex_settings.connect_changed(None, move |_, key| {
+            if tty_rex_key::COLOR_KEYS.contains(&key) {
+                changed.emit(PreferencesInput::HighlightColorsChanged)
+            }
         });
         shared_handlers.push((tty_rex_settings.upcast(), id));
         let style_manager = adw::StyleManager::default();

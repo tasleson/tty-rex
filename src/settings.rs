@@ -89,10 +89,24 @@ pub mod tty_rex_key {
     /// palette's own color. They are always drawn opaque.
     pub const SUPERUSER_HIGHLIGHT_COLOR: &str = "superuser-highlight-color";
     pub const REMOTE_HIGHLIGHT_COLOR: &str = "remote-highlight-color";
+    /// Seconds between telemetry footer updates.
+    pub const TELEMETRY_INTERVAL: &str = "telemetry-interval";
 
+    /// The CSS color keys.
+    pub const COLOR_KEYS: &[&str] = &[SUPERUSER_HIGHLIGHT_COLOR, REMOTE_HIGHLIGHT_COLOR];
     /// All keys, for validation against the schema.
-    pub const ALL: &[&str] = &[SUPERUSER_HIGHLIGHT_COLOR, REMOTE_HIGHLIGHT_COLOR];
+    pub const ALL: &[&str] = &[
+        SUPERUSER_HIGHLIGHT_COLOR,
+        REMOTE_HIGHLIGHT_COLOR,
+        TELEMETRY_INTERVAL,
+    ];
 }
+
+/// Range and default of [`tty_rex_key::TELEMETRY_INTERVAL`] in seconds,
+/// as in the schema.
+pub const TELEMETRY_INTERVAL_MIN: u32 = 1;
+pub const TELEMETRY_INTERVAL_MAX: u32 = 60;
+pub const TELEMETRY_INTERVAL_DEFAULT: u32 = 2;
 
 /// Schema and key providing the desktop monospace font.
 const DESKTOP_INTERFACE_SCHEMA_ID: &str = "org.gnome.desktop.interface";
@@ -402,11 +416,11 @@ impl AppSettings {
         let tty_rex = open(config::TTY_REX_SCHEMA_ID, None, tty_rex_key::ALL)?;
         // Every tab reads these, so invalid values are reported here, once
         // at startup and once per change, rather than by each reader.
-        for key in tty_rex_key::ALL {
+        for key in tty_rex_key::COLOR_KEYS {
             warn_if_invalid_color(&tty_rex, key);
         }
         tty_rex.connect_changed(None, |settings, key| {
-            if tty_rex_key::ALL.contains(&key) {
+            if tty_rex_key::COLOR_KEYS.contains(&key) {
                 warn_if_invalid_color(settings, key);
             }
         });
@@ -469,6 +483,16 @@ impl AppSettings {
                 Ok(())
             }
         }
+    }
+
+    /// Time between telemetry footer updates. The schema enforces the
+    /// range; clamping only guards against a hand-edited older schema.
+    pub fn telemetry_interval(&self) -> std::time::Duration {
+        let seconds = self
+            .tty_rex
+            .uint(tty_rex_key::TELEMETRY_INTERVAL)
+            .clamp(TELEMETRY_INTERVAL_MIN, TELEMETRY_INTERVAL_MAX);
+        std::time::Duration::from_secs(seconds.into())
     }
 
     /// Desktop interface settings, if the schema is installed.
@@ -687,6 +711,12 @@ pub(crate) mod tests {
             config::TTY_REX_SCHEMA_PATH
         )));
         for key in tty_rex_key::ALL {
+            assert!(
+                TTY_REX_SCHEMA.contains(&format!("<key name=\"{key}\" ")),
+                "{key} missing from tty-rex schema"
+            );
+        }
+        for key in tty_rex_key::COLOR_KEYS {
             let start = TTY_REX_SCHEMA
                 .find(&format!("<key name=\"{key}\" type=\"s\">"))
                 .unwrap_or_else(|| panic!("{key} missing from tty-rex schema"));
@@ -703,6 +733,38 @@ pub(crate) mod tests {
             assert_eq!(schema.path().as_deref(), Some(config::TTY_REX_SCHEMA_PATH));
             assert!(open(config::TTY_REX_SCHEMA_ID, None, tty_rex_key::ALL).is_ok());
         }
+    }
+
+    #[test]
+    fn telemetry_interval_matches_schema() {
+        let start = TTY_REX_SCHEMA
+            .find(&format!(
+                "<key name=\"{}\" type=\"u\">",
+                tty_rex_key::TELEMETRY_INTERVAL
+            ))
+            .expect("telemetry interval key");
+        let key = &TTY_REX_SCHEMA[start..];
+        let key = &key[..key.find("</key>").unwrap()];
+        assert!(key.contains(&format!(
+            "<range min=\"{TELEMETRY_INTERVAL_MIN}\" max=\"{TELEMETRY_INTERVAL_MAX}\"/>"
+        )));
+        assert!(key.contains(&format!("<default>{TELEMETRY_INTERVAL_DEFAULT}</default>")));
+
+        if expected_schema(config::TTY_REX_SCHEMA_ID).is_none() {
+            return;
+        }
+        use_memory_backend();
+        let settings = AppSettings::new().unwrap();
+        let interval = |seconds: u64| std::time::Duration::from_secs(seconds);
+        assert_eq!(
+            settings.telemetry_interval(),
+            interval(TELEMETRY_INTERVAL_DEFAULT.into())
+        );
+        settings
+            .tty_rex_gsettings()
+            .set_uint(tty_rex_key::TELEMETRY_INTERVAL, 15)
+            .unwrap();
+        assert_eq!(settings.telemetry_interval(), interval(15));
     }
 
     #[test]
