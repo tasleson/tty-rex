@@ -51,6 +51,7 @@ pub mod settings;
 pub mod shortcuts;
 pub mod spawn;
 pub mod tab;
+pub mod telemetry;
 pub mod terminal;
 pub mod theme_selector;
 pub mod title_dialog;
