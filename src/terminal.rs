@@ -125,7 +125,7 @@ pub fn create() -> vte::Terminal {
 const PADDED_CSS_CLASS: &str = "padded";
 
 /// Applies application-wide settings (font, cursor, bell, padding, size
-/// label).
+/// label, accessibility).
 pub fn apply_app_settings(terminal: &vte::Terminal, settings: &AppSettings) {
     if let Some(terminal) = terminal.downcast_ref::<TerminalWidget>() {
         terminal.set_show_window_size(settings.show_window_size());
@@ -135,6 +135,9 @@ pub fn apply_app_settings(terminal: &vte::Terminal, settings: &AppSettings) {
     terminal.set_cursor_blink_mode(settings.cursor_blink_mode().into());
     terminal.set_text_blink_mode(settings.text_blink_mode().into());
     terminal.set_font(Some(&settings.font_desc()));
+    // ptyxis_tab_constructed() binds enable-a11y to VteTerminal:enable-a11y,
+    // which decides whether VTE exposes terminal text to screen readers.
+    terminal.set_enable_a11y(settings.enable_a11y());
     // Like ptyxis_tab_update_word_char_exceptions().
     set_word_char_exceptions(terminal, settings.word_char_exceptions().as_deref());
     // Like ptyxis_tab_update_padding_cb().

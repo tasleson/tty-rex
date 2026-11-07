@@ -602,6 +602,12 @@ impl AppSettings {
         self.settings.boolean(key::TOAST_ON_COPY_CLIPBOARD)
     }
 
+    /// Whether VTE exposes terminal text to screen readers
+    /// (`ptyxis_settings_get_enable_a11y()`).
+    pub fn enable_a11y(&self) -> bool {
+        self.settings.boolean(key::ENABLE_A11Y)
+    }
+
     /// Punctuation that word-wise selection treats as part of a word, or
     /// `None` (the `ms` key's `nothing`) for VTE's own set
     /// (`ptyxis_settings_dup_word_char_exceptions()`).
@@ -1080,6 +1086,8 @@ pub(crate) mod tests {
                 AppSettings::toast_on_copy_clipboard,
                 true,
             ),
+            // Screen reader access is opt-in.
+            (key::ENABLE_A11Y, AppSettings::enable_a11y, false),
         ];
         for &(name, get, default) in cases {
             assert_eq!(get(&settings), default, "{name} default");
