@@ -683,6 +683,14 @@ impl AppSettings {
             .unwrap_or_else(|| FALLBACK_SYSTEM_FONT.to_owned())
     }
 
+    /// The `font-name` key, or `None` while `use-system-font` is set
+    /// (`ptyxis_settings_get_use_system_font()`,
+    /// `ptyxis_settings_dup_font_name()`).
+    pub fn custom_font_name(&self) -> Option<String> {
+        (!self.settings.boolean(key::USE_SYSTEM_FONT))
+            .then(|| self.settings.string(key::FONT_NAME).into())
+    }
+
     pub fn font_desc(&self) -> pango::FontDescription {
         let font_name = self.settings.string(key::FONT_NAME);
         let system_font = self.system_font_name();

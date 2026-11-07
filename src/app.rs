@@ -42,6 +42,7 @@ use crate::cli::{
 };
 use crate::config;
 use crate::container::{self, Container, Containers};
+use crate::debug_info::{self, ContainerInfo, DebugInfo, LibraryVersion, MonitorInfo, WindowInfo};
 use crate::leader;
 use crate::preferences::{Preferences, PreferencesInit, PreferencesInput};
 use crate::profile::{Profile, Profiles};
@@ -783,9 +784,114 @@ impl App {
             .license_type(gtk::License::Gpl30)
             .website(config::WEBSITE)
             .issue_url(config::ISSUE_URL)
+            .debug_info(self.debug_info().render())
             .build();
         dialog.add_acknowledgement_section(Some(BASED_ON_TITLE), &[PTYXIS_CREDIT]);
         dialog.present(self.application.active_window().as_ref());
+    }
+
+    /// Gathers the About dialog's troubleshooting information
+    /// (`generate_debug_info()`).
+    fn debug_info(&self) -> DebugInfo {
+        let in_sandbox = std::path::Path::new(debug_info::FLATPAK_INFO_PATH).exists();
+        let (vte_sh, os_release_path) = debug_info::system_paths(in_sandbox);
+        // Ptyxis's agent reads the name from the host's `os-release`, which
+        // a sandbox sees under `/var/run/host`.
+        let os_release = std::fs::read_to_string(os_release_path).ok();
+        let flatpak_info = std::fs::read_to_string(debug_info::FLATPAK_INFO_PATH).ok();
+        let display = gdk::Display::default();
+        let ((vte_major, vte_minor, vte_micro), vte_features) = debug_info::vte_runtime_version();
+        let containers = self
+            .containers
+            .list()
+            .into_iter()
+            .filter(|c| !c.is_session())
+            .map(|c| ContainerInfo {
+                display_name: c.display_name().to_owned(),
+                provider: c.provider().to_owned(),
+            })
+            .collect();
+        DebugInfo {
+            app_name: config::APP_NAME.to_owned(),
+            version: config::PACKAGE_VERSION.to_owned(),
+            build_identifier: config::BUILD_IDENTIFIER.to_owned(),
+            os_name: os_release
+                .as_deref()
+                .and_then(debug_info::os_name_from_release),
+            uname: debug_info::uname(),
+            in_sandbox,
+            desktop_session: std::env::var("DESKTOP_SESSION").ok(),
+            glib: LibraryVersion {
+                runtime: debug_info::glib_runtime_version(),
+                compiled: config::BUILD_GLIB_VERSION.to_owned(),
+            },
+            gtk: LibraryVersion {
+                runtime: (
+                    gtk::major_version(),
+                    gtk::minor_version(),
+                    gtk::micro_version(),
+                ),
+                compiled: config::BUILD_GTK_VERSION.to_owned(),
+            },
+            vte: LibraryVersion {
+                runtime: (vte_major, vte_minor, vte_micro),
+                compiled: config::BUILD_VTE_VERSION.to_owned(),
+            },
+            vte_features,
+            display: display
+                .as_ref()
+                .map(|d| d.type_().name().to_owned())
+                .unwrap_or_default(),
+            accessibility: self.settings.enable_a11y(),
+            gtk_theme: gtk::Settings::default()
+                .and_then(|s| s.gtk_theme_name())
+                .map(|name| name.to_string()),
+            system_font: self.settings.system_font_name(),
+            font: self.settings.custom_font_name(),
+            windows: self.debug_window_info(display.as_ref()),
+            development_build: config::is_development_build(),
+            app_id: config::APP_ID.to_owned(),
+            vte_sh_path: vte_sh.display().to_string(),
+            vte_sh_exists: vte_sh.exists(),
+            containers,
+            flatpak_info,
+            os_release,
+        }
+    }
+
+    /// The terminal windows for [`Self::debug_info`], most recently focused
+    /// first as `gtk_application_get_windows()` lists them. Windows not yet
+    /// realized have no renderer or surface to describe and are skipped.
+    fn debug_window_info(&self, display: Option<&gdk::Display>) -> Vec<WindowInfo> {
+        let entries = self.windows.borrow();
+        self.application
+            .windows()
+            .iter()
+            .filter_map(|window| {
+                let entry = entries.iter().find(|e| e.is(window))?;
+                let surface = window.surface()?;
+                let renderer = window.renderer()?;
+                let monitor = display
+                    .and_then(|d| d.monitor_at_surface(&surface))
+                    .map(|m| {
+                        let geom = m.geometry();
+                        MonitorInfo {
+                            x: geom.x(),
+                            y: geom.y(),
+                            width: geom.width(),
+                            height: geom.height(),
+                            refresh_rate: m.refresh_rate(),
+                        }
+                    });
+                Some(WindowInfo {
+                    n_tabs: entry.tab_view.n_pages().unsigned_abs(),
+                    renderer: renderer.type_().name().to_owned(),
+                    scale: surface.scale(),
+                    scale_factor: surface.scale_factor(),
+                    monitor,
+                })
+            })
+            .collect()
     }
 
     /// Shows the Shortcuts page of the preferences window.

@@ -42,6 +42,7 @@ pub mod close_dialog;
 pub mod color_dialog;
 pub mod config;
 pub mod container;
+pub mod debug_info;
 pub mod dressing;
 pub mod find_bar;
 pub mod fullscreen_box;
