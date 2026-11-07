@@ -42,6 +42,11 @@ and apx ones by their labels, and runs shells in them through
 `podman exec` or `distrobox enter`. They appear in the new tab menu and
 as a profile's default container. Ptyxis's JHBuild entry is not ported.
 
+A profile with "Use Proxy" on gives its shells the proxy variables built from
+the desktop's `org.gnome.system.proxy` settings (manual mode only, as in
+Ptyxis), or copied from tty-rex's own environment when that schema is not
+installed.
+
 As in Ptyxis, closing the last window saves its windows and tabs (profile,
 directory, title, zoom, size and container) and the next start reopens
 them: every tab with "Restore Session" on, only pinned tabs otherwise. The
@@ -72,6 +77,10 @@ Beyond Ptyxis, "Show Telemetry" in the terminal's context menu
 with the network (TCP only), CPU and memory use of the processes started
 from the selected tab. It reads `/proc` and the kernel's socket
 diagnostics, which need no privileges.
+
+The About dialog's troubleshooting information follows Ptyxis's layout, with
+the library versions tty-rex was built against taken from `pkg-config` by
+`build.rs`. With no agent to report, it says tty-rex spawns directly.
 
 Also unlike Ptyxis, the "Set Shortcut" dialog in the preferences refuses
 a combination another shortcut already uses, in either the Ptyxis or the
