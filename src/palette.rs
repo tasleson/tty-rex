@@ -147,10 +147,18 @@ pub struct Palette {
     name: String,
     primary: bool,
     use_system_accent: bool,
-    has_light: bool,
-    has_dark: bool,
-    light: Face,
-    dark: Face,
+    faces: Faces,
+}
+
+/// The colors of a palette: one face for both color schemes, or one for
+/// each.
+#[derive(Debug, Clone, PartialEq)]
+enum Faces {
+    /// A palette without `[Light]` and `[Dark]` groups, which suits the
+    /// scheme its background is closest to but is used for both.
+    Single { face: Face, dark: bool },
+    /// The dark face is boxed to keep the variants a similar size.
+    Both { light: Face, dark: Box<Face> },
 }
 
 /// Perceived brightness check from <http://alienryderflex.com/hsp.html>,
@@ -398,19 +406,16 @@ impl Palette {
             group,
         };
 
-        let (light, dark, has_light, has_dark) =
-            if !key_file.has_group(GROUP_LIGHT) && !key_file.has_group(GROUP_DARK) {
-                let face = reader(GROUP_PALETTE).read()?;
-                let dark = is_dark(&face.background);
-                (face.clone(), face, !dark, dark)
-            } else {
-                (
-                    reader(GROUP_LIGHT).read()?,
-                    reader(GROUP_DARK).read()?,
-                    true,
-                    true,
-                )
-            };
+        let faces = if !key_file.has_group(GROUP_LIGHT) && !key_file.has_group(GROUP_DARK) {
+            let face = reader(GROUP_PALETTE).read()?;
+            let dark = is_dark(&face.background);
+            Faces::Single { face, dark }
+        } else {
+            Faces::Both {
+                light: reader(GROUP_LIGHT).read()?,
+                dark: Box::new(reader(GROUP_DARK).read()?),
+            }
+        };
 
         Ok(Self {
             id: id.to_owned(),
@@ -421,10 +426,7 @@ impl Palette {
             use_system_accent: key_file
                 .boolean(GROUP_PALETTE, KEY_USE_SYSTEM_ACCENT)
                 .unwrap_or(false),
-            has_light,
-            has_dark,
-            light,
-            dark,
+            faces,
         })
     }
 
@@ -447,15 +449,27 @@ impl Palette {
     }
 
     pub fn has_light(&self) -> bool {
-        self.has_light
+        !matches!(self.faces, Faces::Single { dark: true, .. })
     }
 
     pub fn has_dark(&self) -> bool {
-        self.has_dark
+        !matches!(self.faces, Faces::Single { dark: false, .. })
     }
 
     pub fn face(&self, dark: bool) -> &Face {
-        if dark { &self.dark } else { &self.light }
+        match &self.faces {
+            Faces::Single { face, .. } => face,
+            Faces::Both {
+                light,
+                dark: dark_face,
+            } => {
+                if dark {
+                    dark_face
+                } else {
+                    light
+                }
+            }
+        }
     }
 }
 
