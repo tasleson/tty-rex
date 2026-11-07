@@ -47,6 +47,7 @@ use crate::palette;
 use crate::profile::Profile;
 use crate::settings::{self, AppSettings, ExitAction};
 use crate::spawn::{self, ChildExit, SpawnError, SpawnRequest, Spawner};
+use crate::tab_notify::{self, TabNotify};
 use crate::telemetry::Pid;
 use crate::terminal::{self, ZoomLevel};
 use crate::title_dialog::{SET_TITLE_LABEL, TitleDialog};
@@ -429,6 +430,8 @@ fn invalidate_thumbnail(root: &gtk::Box) {
 
 /// Everything needed to create a tab.
 pub struct TabInit {
+    /// Identifies the tab, e.g. for its notifications (`uuid`).
+    pub uuid: String,
     pub profile: Profile,
     pub app_settings: AppSettings,
     pub spawner: Rc<dyn Spawner>,
@@ -467,6 +470,14 @@ pub enum TabInput {
     Exited(ChildExit),
     /// Time to check which process leads the terminal.
     PollLeader,
+    /// The shell is about to run a command (`shell-preexec`).
+    ShellPreexec,
+    /// Time to look up the command the shell just started.
+    PollPreexec,
+    /// The shell is about to show its prompt (`shell-precmd`).
+    ShellPrecmd,
+    /// Keyboard focus moved into the tab.
+    FocusEntered,
     /// The `inhibit-logout` setting changed.
     InhibitLogoutChanged,
     UpdateTitle,
@@ -509,6 +520,7 @@ pub enum TabInput {
 }
 
 pub struct Tab {
+    uuid: String,
     profile: Profile,
     app_settings: AppSettings,
     spawner: Rc<dyn Spawner>,
@@ -559,6 +571,11 @@ pub struct Tab {
     leader_monitor: Rc<LeaderMonitor>,
     /// The foreground program seen by the last check.
     foreground: ForegroundState,
+    /// Command line of the process leading the terminal at the last check,
+    /// empty if it could not be read (`command_line`).
+    command_line: String,
+    /// The command the shell is running, for its notification.
+    notify: TabNotify,
     /// Held while that program keeps the session from logging out.
     logout_inhibit: Option<LogoutInhibit>,
     dressing: Dressing,
@@ -704,6 +721,7 @@ impl Tab {
         let new_process = std::mem::replace(&mut self.leader_pgrp, pgrp) != pgrp;
         let changed = self.set_leader_kind(kind, root) | new_process;
         if running {
+            self.command_line = pgrp.and_then(leader::process_cmdline).unwrap_or_default();
             let foreground =
                 pgrp.and_then(|pgrp| leader::foreground_of(pgrp, self.child_pid.get()));
             let foreground = ForegroundState::new(foreground.as_ref());
@@ -920,6 +938,11 @@ impl Component for Tab {
         terminal.connect_increase_font_size(move |_| input.emit(TabInput::ZoomIn));
         let input = sender.input_sender().clone();
         terminal.connect_decrease_font_size(move |_| input.emit(TabInput::ZoomOut));
+        // Like ptyxis_tab_notify_init().
+        let input = sender.input_sender().clone();
+        terminal::connect_shell_preexec(&terminal, move |_| input.emit(TabInput::ShellPreexec));
+        let input = sender.input_sender().clone();
+        terminal::connect_shell_precmd(&terminal, move |_| input.emit(TabInput::ShellPrecmd));
         let has_pressed_key = Rc::new(Cell::new(false));
         let pressed = Rc::clone(&has_pressed_key);
         terminal.connect_commit(move |_, _, _| pressed.set(true));
@@ -938,6 +961,14 @@ impl Component for Tab {
             glib::Propagation::Proceed
         });
         root.add_controller(keys);
+        let focus = gtk::EventControllerFocus::new();
+        let input = sender.input_sender().clone();
+        focus.connect_contains_focus_notify(move |focus| {
+            if focus.contains_focus() {
+                input.emit(TabInput::FocusEntered);
+            }
+        });
+        root.add_controller(focus);
 
         terminal.set_context_menu_model(Some(&context_menu()));
         install_terminal_actions(&terminal);
@@ -1009,6 +1040,7 @@ impl Component for Tab {
         let title_prefix = normalize_title_prefix(init.title_prefix);
         let ignore_osc_title_setting = init.app_settings.ignore_osc_title();
         let mut model = Tab {
+            uuid: init.uuid,
             profile: init.profile,
             app_settings: init.app_settings,
             spawner: init.spawner,
@@ -1045,6 +1077,8 @@ impl Component for Tab {
             leader_pgrp: None,
             leader_monitor,
             foreground: ForegroundState::default(),
+            command_line: String::new(),
+            notify: TabNotify::default(),
             logout_inhibit: None,
             dressing: Dressing::new(),
             shared_handlers,
@@ -1093,6 +1127,28 @@ impl Component for Tab {
             }
             TabInput::Exited(exit) => self.handle_exit(exit, root, &sender),
             TabInput::PollLeader => self.poll_leader(root),
+            TabInput::ShellPreexec => {
+                self.notify.preexec(Instant::now());
+                // Like ptyxis_tab_notify_shell_preexec_cb(), look the
+                // command up asynchronously; the prompt may come back first.
+                sender.input(TabInput::PollPreexec);
+            }
+            TabInput::PollPreexec => {
+                self.poll_leader(root);
+                self.notify.polled(self.command_line.clone());
+            }
+            TabInput::ShellPrecmd => {
+                if let Some(cmdline) = self.notify.precmd(Instant::now()) {
+                    tab_notify::show(root, &self.uuid, &cmdline);
+                }
+            }
+            TabInput::FocusEntered => {
+                // Like ptyxis_tab_notify_contains_focus_cb().
+                if let Some((_, page)) = find_page(root) {
+                    page.set_needs_attention(false);
+                }
+                tab_notify::withdraw(&self.uuid);
+            }
             TabInput::InhibitLogoutChanged => self.update_logout_inhibit(root),
             TabInput::UpdateTitle => {}
             TabInput::AppSettingsChanged => {

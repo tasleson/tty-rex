@@ -56,6 +56,7 @@ pub mod settings;
 pub mod shortcuts;
 pub mod spawn;
 pub mod tab;
+pub mod tab_notify;
 pub mod telemetry;
 pub mod telemetry_bar;
 pub mod terminal;

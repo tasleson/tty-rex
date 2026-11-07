@@ -91,6 +91,8 @@ pub struct TabRequest {
 
 struct TabHandle {
     controller: Controller<Tab>,
+    /// Identifies the tab to `app.focus-tab-by-uuid`.
+    uuid: String,
     terminal: vte::Terminal,
     profile_uuid: String,
     zoom: Rc<Cell<ZoomLevel>>,
@@ -195,6 +197,14 @@ relm4::new_stateless_action!(AboutAction, AppActions, "about");
 relm4::new_stateless_action!(NewWindowAction, AppActions, "new-window");
 relm4::new_stateless_action!(NewTabAction, AppActions, "new-tab");
 relm4::new_stateful_action!(EditProfileAction, AppActions, "edit-profile", String, ());
+// Activated by command-finished notifications (`tab_notify`).
+relm4::new_stateful_action!(
+    FocusTabByUuidAction,
+    AppActions,
+    "focus-tab-by-uuid",
+    String,
+    ()
+);
 
 /// tty-rex's icon, named after the default application id like the desktop
 /// file's `Icon=`, so builds with another id (e.g. `.Devel`) find it too.
@@ -344,6 +354,14 @@ impl App {
             });
         application.add_action(edit_profile.gio_action());
         let weak = Rc::downgrade(&app);
+        let focus_tab =
+            RelmAction::<FocusTabByUuidAction>::new_with_target_value(move |_, uuid| {
+                if let Some(app) = weak.upgrade() {
+                    app.focus_tab_by_uuid(&uuid);
+                }
+            });
+        application.add_action(focus_tab.gio_action());
+        let weak = Rc::downgrade(&app);
         let new_window = RelmAction::<NewWindowAction>::new_stateless(move |_| {
             if let Some(app) = weak.upgrade() {
                 // GNOME Shell launches through this action rather than
@@ -393,6 +411,7 @@ impl App {
     pub fn create_tab(&self, request: TabRequest) -> Result<gtk::Widget, SettingsError> {
         let profile = self.profiles.profile(request.profile_uuid.as_deref())?;
         let profile_uuid = profile.uuid().to_owned();
+        let uuid = glib::uuid_string_random().to_string();
         let zoom = Rc::new(Cell::new(request.zoom));
         let color = Rc::new(Cell::new(None));
         let child_pid = Rc::new(Cell::new(None));
@@ -403,6 +422,7 @@ impl App {
             .or_else(|| request.previous_cwd_uri.clone());
         let controller = Tab::builder()
             .launch(TabInit {
+                uuid: uuid.clone(),
                 profile,
                 app_settings: self.settings.clone(),
                 spawner: Rc::clone(&self.spawner),
@@ -427,6 +447,7 @@ impl App {
             child.clone(),
             TabHandle {
                 controller,
+                uuid,
                 terminal,
                 profile_uuid,
                 zoom,
@@ -452,6 +473,38 @@ impl App {
             child_pid: Rc::clone(&handle.child_pid),
             container: handle.container.borrow().clone(),
         })
+    }
+
+    /// Selects and focuses the tab `uuid` in its window, searching windows
+    /// from the most recently focused (`ptyxis_application_focus_tab_by_uuid()`).
+    fn focus_tab_by_uuid(&self, uuid: &str) {
+        glib::g_debug!("tty-rex", "Looking for tab \"{uuid}\"");
+        // Found first so no borrow is held while the selection changes.
+        let found = {
+            let entries = self.windows.borrow();
+            let tabs = self.tabs.borrow();
+            self.application
+                .windows()
+                .iter()
+                .filter_map(|window| entries.iter().find(|e| e.is(window)))
+                .find_map(|entry| {
+                    let tab_view = &entry.tab_view;
+                    (0..tab_view.n_pages())
+                        .map(|i| tab_view.nth_page(i))
+                        .find_map(|page| {
+                            let handle = tabs.get(&page.child())?;
+                            (handle.uuid == uuid).then(|| {
+                                (entry.window_ref(), page, handle.controller.sender().clone())
+                            })
+                        })
+                })
+        };
+        // Like ptyxis_window_focus_tab_by_uuid().
+        if let Some((window, page, tab)) = found {
+            window.tab_view.set_selected_page(&page);
+            window.window.present();
+            tab.emit(TabInput::Focus);
+        }
     }
 
     /// Drops a tab's component; its terminal (and child) go away with it.
