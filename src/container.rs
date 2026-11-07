@@ -301,6 +301,57 @@ pub fn exec_plan(
     }
 }
 
+/// Host variables a shell in a container still needs, such as the display
+/// and session bus (`ptyxis_run_context_add_minimal_environment()`).
+/// `podman exec` passes none of the host's environment, so without these
+/// graphical programs and D-Bus clients in a toolbox cannot reach the
+/// session. `HOME` is left out, as the agent does, because the container
+/// sets its own.
+const MINIMAL_ENVIRONMENT: &[&str] = &[
+    "AT_SPI_BUS_ADDRESS",
+    "COLUMNS",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
+    "DESKTOP_SESSION",
+    "DISPLAY",
+    "LANG",
+    "LINES",
+    "SHELL",
+    "SSH_AUTH_SOCK",
+    "USER",
+    "VTE_VERSION",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_DATA_DIRS",
+    "XDG_MENU_PREFIX",
+    "XDG_RUNTIME_DIR",
+    "XDG_SEAT",
+    "XDG_SESSION_DESKTOP",
+    "XDG_SESSION_ID",
+    "XDG_SESSION_TYPE",
+    "XDG_VTNR",
+];
+
+/// The environment (`KEY=VALUE`) for a program in a container: the
+/// minimal host variables found through `getenv`, then `env`, whose
+/// variables win over host ones of the same name.
+pub fn with_minimal_environment(
+    env: &[String],
+    getenv: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let overridden = |key: &str| {
+        env.iter()
+            .any(|var| var.split_once('=').map_or(var.as_str(), |(k, _)| k) == key)
+    };
+    MINIMAL_ENVIRONMENT
+        .iter()
+        .filter(|key| !overridden(key))
+        .filter_map(|key| getenv(key).map(|value| format!("{key}={value}")))
+        .chain(env.iter().cloned())
+        .collect()
+}
+
 /// Container ids already started by tty-rex (`has_started`), so each is
 /// started once.
 static STARTED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
@@ -741,6 +792,27 @@ mod tests {
             assert_eq!(container.provider(), provider);
             assert_eq!(container.title(), title);
         }
+    }
+
+    #[test]
+    fn minimal_environment() {
+        let env = strings(&["VTE_VERSION=8200", "TERM=xterm-256color"]);
+        let host = |key: &str| match key {
+            "DISPLAY" => Some(":0".to_owned()),
+            "HOME" => Some("/home/me".to_owned()),
+            "VTE_VERSION" => Some("7000".to_owned()),
+            "WAYLAND_DISPLAY" => Some("wayland-0".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            with_minimal_environment(&env, host),
+            [
+                "DISPLAY=:0",
+                "WAYLAND_DISPLAY=wayland-0",
+                "VTE_VERSION=8200",
+                "TERM=xterm-256color",
+            ]
+        );
     }
 
     #[test]

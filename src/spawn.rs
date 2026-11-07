@@ -438,11 +438,13 @@ fn spawn_on_host(
             // host command needs none of its own.
             let cwd = plan.cwd.or_else(home_dir).unwrap_or_default();
             env.push(format!("PWD={cwd}"));
+            let env_in_container =
+                container::with_minimal_environment(&env, |key| std::env::var(key).ok());
             let user = glib::user_name();
             let exec = container::exec_plan(
                 &request.container,
                 &plan.argv,
-                &env,
+                &env_in_container,
                 &ExecContext {
                     user: &user.to_string_lossy(),
                     cwd: &cwd,
