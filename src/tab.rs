@@ -506,15 +506,21 @@ fn install_terminal_actions(terminal: &vte::Terminal, links: &Links, settings: &
     let url: Rc<RefCell<Option<String>>> = Rc::default();
     let weak = terminal.downgrade();
     let target = Rc::clone(&url);
+    // Both skip an empty link, which a custom link can substitute to
+    // (`open_link_action()`, `copy_link_address_action()`).
     open_link.connect_activate(move |_, _| {
-        if let (Some(terminal), Some(url)) = (weak.upgrade(), target.borrow().as_deref()) {
+        if let (Some(terminal), Some(url)) = (weak.upgrade(), target.borrow().as_deref())
+            && !url.is_empty()
+        {
             open_uri(&terminal, url);
         }
     });
     let weak = terminal.downgrade();
     let target = Rc::clone(&url);
     copy_link.connect_activate(move |_, _| {
-        if let (Some(terminal), Some(url)) = (weak.upgrade(), target.borrow().as_deref()) {
+        if let (Some(terminal), Some(url)) = (weak.upgrade(), target.borrow().as_deref())
+            && !url.is_empty()
+        {
             terminal.clipboard().set_text(url);
             toast(&terminal, COPIED_TOAST_TIMEOUT_SECS, COPIED_TOAST_TITLE);
         }
