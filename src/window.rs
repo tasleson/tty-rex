@@ -35,6 +35,7 @@ use relm4::prelude::*;
 use vte::prelude::*;
 
 use crate::app::{App, TabRef, TabRequest};
+use crate::close_dialog;
 use crate::config;
 use crate::container::Container;
 use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
@@ -219,8 +220,9 @@ pub struct Window {
     /// Identifies the latest overview close, so reopening the overview
     /// before a close finishes cancels its delayed refocus.
     overview_close_serial: u32,
-    /// Set once the window is closing as a whole, when its tabs going away
-    /// must not save the session again (`in_close_request`).
+    /// Set while the window is closing as a whole, when its tabs going away
+    /// must not save the session again (`in_close_request`). It is cleared
+    /// if the user cancels the close.
     in_close_request: Rc<Cell<bool>>,
     single_terminal: bool,
     /// Closed tabs that `win.undo-close-tab` can still reopen; shared with
@@ -334,9 +336,10 @@ impl Window {
     /// Keeps a closed tab alive for a few seconds so it can be reopened
     /// (`ptyxis_window_close_page_cb()`). A standalone `-x` window has no
     /// `win.undo-close-tab`, and tabs of a window that is closing as a whole
-    /// were released already.
+    /// were released already. Tabs closed while the window asks whether to
+    /// close the rest are parked, so they come back if the user cancels.
     fn park_tab(&self, child: gtk::Widget) {
-        if self.single_terminal || self.in_close_request.get() || self.app.tab(&child).is_none() {
+        if self.single_terminal || self.app.tab(&child).is_none() {
             self.app.remove_tab(&child);
             return;
         }
@@ -540,6 +543,150 @@ fn add_theme_controls(
     let action_name = format!("win.{INTERFACE_STYLE_ITEM}");
     if let Some(popover) = menu_button.popover().and_downcast::<gtk::PopoverMenu>() {
         popover.add_child(&theme_selector(&action_name), INTERFACE_STYLE_ITEM);
+    }
+}
+
+/// The subtitle of a tab: the file or directory the shell reported
+/// (`ptyxis_tab_dup_subtitle()`).
+fn tab_subtitle(terminal: &vte::Terminal) -> String {
+    let home = glib::home_dir();
+    terminal::current_file_uri(terminal)
+        .filter(|uri| !uri.is_empty())
+        .or_else(|| terminal::current_directory_uri(terminal).filter(|uri| !uri.is_empty()))
+        .map(|uri| terminal::collapse_uri(&uri, &home.to_string_lossy()))
+        .unwrap_or_default()
+}
+
+/// How the close dialog lists a tab: the program in its foreground, else
+/// the tab's own title (`_ptyxis_close_dialog_new()`).
+fn close_dialog_row(tab: &TabRef, page: &adw::TabPage) -> close_dialog::Row {
+    match tab.foreground() {
+        Some(foreground) => close_dialog::Row {
+            title: foreground.cmdline.unwrap_or_default(),
+            subtitle: format!("Process {}", foreground.pid),
+        },
+        None => close_dialog::Row {
+            title: page.title().into(),
+            subtitle: tab_subtitle(&tab.terminal),
+        },
+    }
+}
+
+/// Asks whether to close `pages`, raising the tab when there is only one
+/// like `_ptyxis_close_dialog_new()`.
+fn confirm_close(
+    tab_view: &adw::TabView,
+    pages: &[(adw::TabPage, close_dialog::Row)],
+    on_response: impl FnOnce(bool) + 'static,
+) {
+    if let [(page, _)] = pages {
+        tab_view.set_selected_page(page);
+    }
+    let rows: Vec<_> = pages.iter().map(|(_, row)| row.clone()).collect();
+    close_dialog::present(tab_view, &rows, on_response);
+}
+
+/// Asks before closing a tab that runs a program other than a shell
+/// (`ptyxis_window_close_page_cb()`). Confirming ends the program; the
+/// tab is still parked like any other closed one.
+fn close_page(app: &Rc<App>, tab_view: &adw::TabView, page: &adw::TabPage) -> glib::Propagation {
+    // A released tab belongs to a window that is going away.
+    let Some(tab) = app.tab(&page.child()) else {
+        return glib::Propagation::Proceed;
+    };
+    if !tab.is_running() || !app.settings().prompt_on_close() {
+        return glib::Propagation::Proceed;
+    }
+    let pages = [(page.clone(), close_dialog_row(&tab, page))];
+    let weak_tab_view = tab_view.downgrade();
+    let page = page.clone();
+    confirm_close(tab_view, &pages, move |confirmed| {
+        if confirmed {
+            tab.sender.emit(crate::tab::TabInput::ForceQuit);
+        }
+        if let Some(tab_view) = weak_tab_view.upgrade() {
+            tab_view.close_page_finish(&page, confirmed);
+        }
+    });
+    glib::Propagation::Stop
+}
+
+/// What a window closes with and through (`ptyxis_window_close_request()`).
+struct Closing {
+    app: Rc<App>,
+    window: adw::ApplicationWindow,
+    tab_view: adw::TabView,
+    in_close_request: Rc<Cell<bool>>,
+    parked: Rc<RefCell<ParkingLot<gtk::Widget>>>,
+}
+
+impl Closing {
+    /// Hands the window's tabs back and lets it go. `running` tabs are
+    /// ended right away, as the user confirmed.
+    fn release(&self, running: &[gtk::Widget]) {
+        self.in_close_request.set(true);
+        for child in running {
+            self.app.force_quit_tab(child);
+        }
+        release_tabs(&self.app, &self.tab_view);
+        release_parked(&self.app, &self.parked);
+    }
+
+    /// Closing the last window saves the session first. With
+    /// `prompt-on-close` on, tabs without a running program close at once
+    /// and the user is asked about the rest, which keeps the window open
+    /// until they confirm.
+    fn request(&self, single_terminal: bool) -> glib::Propagation {
+        if !single_terminal && self.app.is_last_window(self.window.upcast_ref()) {
+            self.app.save_session();
+        }
+        if !self.app.settings().prompt_on_close() {
+            self.release(&[]);
+            return glib::Propagation::Proceed;
+        }
+
+        // Last to first, like the C loop.
+        let mut running = Vec::new();
+        let mut idle = Vec::new();
+        for page in (0..self.tab_view.n_pages())
+            .rev()
+            .map(|i| self.tab_view.nth_page(i))
+        {
+            match self.app.tab(&page.child()).filter(TabRef::is_running) {
+                Some(tab) => {
+                    let row = close_dialog_row(&tab, &page);
+                    running.push((page, row));
+                }
+                None => idle.push(page),
+            }
+        }
+        if running.is_empty() {
+            self.release(&[]);
+            return glib::Propagation::Proceed;
+        }
+
+        self.in_close_request.set(true);
+        for page in idle {
+            self.tab_view.close_page(&page);
+        }
+        let children: Vec<_> = running.iter().map(|(page, _)| page.child()).collect();
+        let closing = Closing {
+            app: Rc::clone(&self.app),
+            window: self.window.clone(),
+            tab_view: self.tab_view.clone(),
+            in_close_request: Rc::clone(&self.in_close_request),
+            parked: Rc::clone(&self.parked),
+        };
+        // ptyxis_window_close_request_cb()
+        confirm_close(&self.tab_view, &running, move |confirmed| {
+            if confirmed {
+                closing.release(&children);
+                closing.window.destroy();
+            } else {
+                closing.in_close_request.set(false);
+            }
+        });
+        glib::Propagation::Stop
     }
 }
 
@@ -937,10 +1084,16 @@ impl Component for Window {
             Some(window.tab_view)
         });
 
+        // Whether a tab may close is decided before libadwaita closes it,
+        // so this cannot wait for a message either.
+        let weak_app = Rc::downgrade(&app);
+        tab_view.connect_close_page(move |tab_view, page| match weak_app.upgrade() {
+            Some(app) => close_page(&app, tab_view, page),
+            None => glib::Propagation::Proceed,
+        });
+
         // Tabs must be released while the tab view still has its pages, so
-        // this runs synchronously rather than through a message. Closing the
-        // last window saves the session first, like
-        // ptyxis_window_close_request().
+        // this runs synchronously rather than through a message.
         let weak_app = Rc::downgrade(&app);
         let weak_tab_view = tab_view.downgrade();
         let in_close_request = Rc::new(Cell::new(false));
@@ -948,15 +1101,18 @@ impl Component for Window {
         let parked = Rc::new(RefCell::new(ParkingLot::default()));
         let closing_parked = Rc::clone(&parked);
         window.connect_close_request(move |window| {
-            closing.set(true);
-            if let (Some(app), Some(tab_view)) = (weak_app.upgrade(), weak_tab_view.upgrade()) {
-                if !single_terminal && app.is_last_window(window.upcast_ref()) {
-                    app.save_session();
-                }
-                release_tabs(&app, &tab_view);
-                release_parked(&app, &closing_parked);
+            let (Some(app), Some(tab_view)) = (weak_app.upgrade(), weak_tab_view.upgrade()) else {
+                closing.set(true);
+                return glib::Propagation::Proceed;
+            };
+            Closing {
+                app,
+                window: window.clone(),
+                tab_view,
+                in_close_request: Rc::clone(&closing),
+                parked: Rc::clone(&closing_parked),
             }
-            glib::Propagation::Proceed
+            .request(single_terminal)
         });
 
         let model = Window {

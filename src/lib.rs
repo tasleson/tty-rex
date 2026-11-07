@@ -37,6 +37,7 @@
 pub mod app;
 pub mod choices;
 pub mod cli;
+pub mod close_dialog;
 pub mod color_dialog;
 pub mod config;
 pub mod container;

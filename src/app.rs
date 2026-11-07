@@ -39,11 +39,12 @@ use vte::prelude::*;
 use crate::cli::{self, CommandLineAction, CommandLineOptions, WindowTarget};
 use crate::config;
 use crate::container::{self, Container, Containers};
+use crate::leader;
 use crate::preferences::{Preferences, PreferencesInit, PreferencesInput};
 use crate::profile::{Profile, Profiles};
 use crate::session::{self, RestoreOptions, Session, SessionTab, SessionWindow};
 use crate::settings::{self, AppSettings, SettingsError};
-use crate::spawn::{HostSpawner, Spawner};
+use crate::spawn::{self, HostSpawner, Spawner};
 use crate::tab::{Tab, TabInit, TabInput};
 use crate::telemetry::Pid;
 use crate::terminal::{self, ZoomLevel};
@@ -117,6 +118,22 @@ pub struct TabRef {
     pub child_pid: Rc<Cell<Option<Pid>>>,
     /// The container the tab was opened in, if not its profile's default.
     pub container: Option<Container>,
+}
+
+impl TabRef {
+    /// The program in the foreground if it is not the tab's own child
+    /// (`ptyxis_tab_has_foreground_process()`).
+    pub fn foreground(&self) -> Option<leader::Foreground> {
+        let pty = self.terminal.pty()?;
+        leader::foreground_process(pty.fd(), self.child_pid.get())
+    }
+
+    /// Whether closing the tab would end a program other than a shell
+    /// (`ptyxis_tab_is_running()`).
+    pub fn is_running(&self) -> bool {
+        self.foreground()
+            .is_some_and(|foreground| foreground.is_running(spawn::is_shell))
+    }
 }
 
 /// Handle to a launched window.
@@ -205,6 +222,26 @@ fn send_signal(pid: Pid, signal: libc::c_int) {
             "Cannot send signal {signal} to process {pid}: {e}"
         );
     }
+}
+
+/// Sends `SIGHUP` to the program in `child_pid`, then `SIGKILL` shortly
+/// after unless it has exited (`ptyxis_tab_force_quit()`). `keep_alive` is
+/// held until then; while the tab lives its exit clears `child_pid`, so an
+/// already reaped pid is never signaled.
+pub fn hang_up<T: 'static>(child_pid: &Rc<Cell<Option<Pid>>>, keep_alive: T) {
+    let Some(pid) = child_pid.get() else {
+        return;
+    };
+    send_signal(pid, libc::SIGHUP);
+    let child_pid = Rc::clone(child_pid);
+    glib::timeout_add_local_once(FORCE_QUIT_KILL_DELAY, move || {
+        // A tab whose profile restarts its program may have a new one
+        // by now; that one goes with the terminal, like after a close.
+        if child_pid.get() == Some(pid) {
+            send_signal(pid, libc::SIGKILL);
+        }
+        drop(keep_alive);
+    });
 }
 
 /// The window icon: tty-rex's own when the icon theme has it, otherwise
@@ -431,18 +468,8 @@ impl App {
         let Some(handle) = self.tabs.borrow_mut().remove(child) else {
             return;
         };
-        let Some(pid) = handle.child_pid.get() else {
-            return;
-        };
-        send_signal(pid, libc::SIGHUP);
-        glib::timeout_add_local_once(FORCE_QUIT_KILL_DELAY, move || {
-            // A tab whose profile restarts its program may have a new one
-            // by now; that one goes with the terminal, like after a close.
-            if handle.child_pid.get() == Some(pid) {
-                send_signal(pid, libc::SIGKILL);
-            }
-            drop(handle);
-        });
+        let child_pid = Rc::clone(&handle.child_pid);
+        hang_up(&child_pid, handle);
     }
 
     pub fn new_window(self: &Rc<Self>) -> WindowRef {

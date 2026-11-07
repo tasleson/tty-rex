@@ -434,6 +434,9 @@ pub enum TabInput {
     Unrealized,
     /// The tab was reopened after being closed (`win.undo-close-tab`).
     Restored,
+    /// End the program because the user confirmed closing the tab
+    /// (`ptyxis_tab_force_quit()`).
+    ForceQuit,
 }
 
 pub struct Tab {
@@ -476,6 +479,9 @@ pub struct Tab {
     color_dialog: Option<gio::Cancellable>,
     /// The running child's pid; `None` while spawning or after it exited.
     child_pid: Rc<Cell<Option<Pid>>>,
+    /// Set once the program was ended on purpose, whose exit then needs no
+    /// banner or exit action (`forced_exit`).
+    forced_exit: bool,
     /// Identifies the current color dialog, like `title_dialog_serial`.
     color_dialog_serial: u32,
     leader_kind: LeaderKind,
@@ -729,6 +735,9 @@ impl Tab {
             TabState::Failed
         };
         self.set_leader_kind(LeaderKind::Unknown, root);
+        if self.forced_exit {
+            return;
+        }
         let quick_exit =
             self.spawned_at.elapsed() < QUICK_EXIT_THRESHOLD && !self.has_pressed_key.get();
         match exit_outcome(
@@ -911,6 +920,7 @@ impl Component for Tab {
             title_dialog_serial: 0,
             color: init.color,
             child_pid: init.child_pid,
+            forced_exit: false,
             color_icon: None,
             color_dialog: None,
             color_dialog_serial: 0,
@@ -1073,6 +1083,10 @@ impl Component for Tab {
                 if matches!(self.state, TabState::Exited | TabState::Failed) {
                     self.banner.set_visible(true);
                 }
+            }
+            TabInput::ForceQuit => {
+                self.forced_exit = true;
+                crate::app::hang_up(&self.child_pid, ());
             }
             TabInput::Unrealized => {
                 // A tab moved to another window (e.g. by the detach-tab
