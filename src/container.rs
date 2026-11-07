@@ -31,7 +31,7 @@
 //! The agent's JHBuild pseudo container is not ported.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -62,14 +62,9 @@ const DATABASE_FILE: &str = "db.sql";
 /// podman creates its storage directories private to the user.
 const STORAGE_DIR_MODE: u32 = 0o700;
 
-/// Labels marking containers managed by distrobox or apx. Checked before
-/// the toolbox label because distrobox may set that one too (Ptyxis #245).
-const MANAGER_LABEL: &str = "manager";
+/// Values of the `manager` label marking containers managed by distrobox
+/// or apx.
 const DISTROBOX_MANAGERS: &[&str] = &["distrobox", "apx"];
-const TOOLBOX_LABEL: &str = "com.github.containers.toolbox";
-/// Set to "1" on a distrobox created with `--init` or `--unshare-groups`,
-/// which must not get the `--no-tty` workaround (Ptyxis #477, #545).
-const UNSHARE_GROUPS_LABEL: &str = "distrobox.unshare_groups";
 
 /// The first podman whose `exec` takes `--detach-keys=`, which keeps it
 /// from stealing Ctrl+P (containers/toolbox#394).
@@ -158,18 +153,65 @@ struct PodmanEntry {
     names: Vec<String>,
     /// podman prints `null` for a container without labels.
     #[serde(default)]
-    labels: Option<HashMap<String, serde_json::Value>>,
+    labels: Option<Labels>,
     #[serde(default)]
     is_infra: bool,
 }
 
-fn classify(labels: &HashMap<String, serde_json::Value>) -> ContainerKind {
-    let label = |key: &str| labels.get(key).and_then(serde_json::Value::as_str);
-    if label(MANAGER_LABEL).is_some_and(|manager| DISTROBOX_MANAGERS.contains(&manager)) {
-        ContainerKind::Distrobox {
-            unshare_groups: label(UNSHARE_GROUPS_LABEL) == Some("1"),
+/// A label value: only strings are compared, but a label of any other
+/// type still counts as present.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LabelValue {
+    Text(String),
+    Other(serde::de::IgnoredAny),
+}
+
+impl LabelValue {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Other(_) => None,
         }
-    } else if labels.contains_key(TOOLBOX_LABEL) {
+    }
+}
+
+/// Keeps a `null` label as present; `Option` alone would read it as absent.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<LabelValue>, D::Error> {
+    LabelValue::deserialize(deserializer).map(Some)
+}
+
+/// The labels [`classify`] reads, out of all a container carries. The
+/// field names must match the `*_LABEL` constants (checked by a test).
+#[derive(Debug, Default, Deserialize)]
+struct Labels {
+    #[serde(default, rename = "manager", deserialize_with = "present")]
+    manager: Option<LabelValue>,
+    #[serde(
+        default,
+        rename = "distrobox.unshare_groups",
+        deserialize_with = "present"
+    )]
+    unshare_groups: Option<LabelValue>,
+    #[serde(
+        default,
+        rename = "com.github.containers.toolbox",
+        deserialize_with = "present"
+    )]
+    toolbox: Option<LabelValue>,
+}
+
+fn classify(labels: &Labels) -> ContainerKind {
+    fn text(label: &Option<LabelValue>) -> Option<&str> {
+        label.as_ref().and_then(LabelValue::as_str)
+    }
+    if text(&labels.manager).is_some_and(|manager| DISTROBOX_MANAGERS.contains(&manager)) {
+        ContainerKind::Distrobox {
+            unshare_groups: text(&labels.unshare_groups) == Some("1"),
+        }
+    } else if labels.toolbox.is_some() {
         ContainerKind::Toolbox
     } else {
         ContainerKind::Podman
@@ -760,6 +802,28 @@ mod tests {
         }
         assert!((1, 8, 1) >= DETACH_KEYS_MIN_VERSION);
         assert!((1, 8, 0) < DETACH_KEYS_MIN_VERSION);
+    }
+
+    #[test]
+    fn labels_of_any_type_classify() {
+        let json = r#"[
+            {"Id": "a", "Labels": {"manager": "distrobox", "distrobox.unshare_groups": "1"}},
+            {"Id": "b", "Labels": {"com.github.containers.toolbox": null, "other": [1, {"x": 2}]}}
+        ]"#;
+        let kinds: Vec<_> = parse_podman_ps(json)
+            .unwrap()
+            .iter()
+            .map(|c| c.kind().clone())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ContainerKind::Distrobox {
+                    unshare_groups: true
+                },
+                ContainerKind::Toolbox
+            ]
+        );
     }
 
     #[test]
