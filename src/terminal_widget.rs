@@ -18,16 +18,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The `VteTerminal` subclass tabs use, for the parts of `PtyxisTerminal`
-//! (`src/ptyxis-terminal.c`) that need a subclass: the snapshot override
-//! and the hover-URI revealer with its `measure`/`size_allocate` overrides.
+//! (`src/ptyxis-terminal.c`) that need a subclass: the snapshot override,
+//! the hover-URI revealer with its `measure`/`size_allocate` overrides, and
+//! the drop target with its highlight, which pastes dropped files, URIs and
+//! text.
 //!
-//! The size revealer and the drop highlight have no counterpart in tty-rex
-//! yet.
+//! The size revealer has no counterpart in tty-rex yet.
 
 use std::cell::{Cell, OnceCell};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 use gtk::prelude::*;
-use gtk::{glib, graphene, gsk, pango};
+use gtk::{gdk, gio, glib, graphene, gsk, pango};
 use vte::prelude::*;
 use vte::subclass::prelude::*;
 
@@ -41,6 +45,155 @@ const HOVER_URI_CSS_CLASS: &str = "hover-uri";
 
 /// Width limit of the hover-URI label, from `ptyxis-terminal.ui`.
 const HOVER_URI_MAX_WIDTH_CHARS: i32 = 60;
+
+/// Style class of the drop highlight, as in `ptyxis-terminal.ui`.
+const DROP_HIGHLIGHT_CSS_CLASS: &str = "drop-highlight";
+
+/// Priority of the drop data reads (`DROP_REQUEST_PRIORITY`).
+const DROP_REQUEST_PRIORITY: glib::Priority = glib::Priority::DEFAULT;
+const APPLICATION_VND_PORTAL_FILETRANSFER: &str = "application/vnd.portal.filetransfer";
+const APPLICATION_VND_PORTAL_FILES: &str = "application/vnd.portal.files";
+const TEXT_X_MOZ_URL: &str = "text/x-moz-url";
+const TEXT_URI_LIST: &str = "text/uri-list";
+
+/// Where the Document Portal records the real path of a file it exports.
+const FILE_ATTRIBUTE_HOST_PATH: &str = "xattr::document-portal.host-path";
+
+/// Suffix early Document Portal versions appended to the host path.
+const HOST_PATH_NUL_SUFFIX: &str = "\\x00";
+
+/// `ptyxis_terminal_get_drop_action()`: copy if the source allows it, else
+/// move, else nothing.
+fn drop_action(actions: gdk::DragAction) -> gdk::DragAction {
+    if actions.contains(gdk::DragAction::COPY) {
+        gdk::DragAction::COPY
+    } else if actions.contains(gdk::DragAction::MOVE) {
+        gdk::DragAction::MOVE
+    } else {
+        gdk::DragAction::empty()
+    }
+}
+
+/// How a drop is read, by the first format it offers in
+/// `ptyxis_terminal_drop_target_drop()`'s order of preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropRequest {
+    /// Files, as a `GdkFileList` (falling back to `text/uri-list`).
+    FileList,
+    /// A link dragged from a browser: URL, newline, page title, in UCS-2.
+    MozUrl,
+    /// Plain text.
+    String,
+}
+
+impl DropRequest {
+    fn for_formats(formats: &gdk::ContentFormats) -> Option<Self> {
+        if formats.contains_type(gdk::FileList::static_type())
+            || formats.contains_type(gio::File::static_type())
+            || [
+                TEXT_URI_LIST,
+                APPLICATION_VND_PORTAL_FILETRANSFER,
+                APPLICATION_VND_PORTAL_FILES,
+            ]
+            .into_iter()
+            .any(|mime_type| formats.contain_mime_type(mime_type))
+        {
+            Some(Self::FileList)
+        } else if formats.contain_mime_type(TEXT_X_MOZ_URL) {
+            Some(Self::MozUrl)
+        } else if formats.contains_type(glib::Type::STRING) {
+            Some(Self::String)
+        } else {
+            None
+        }
+    }
+}
+
+/// `file_is_from_document_portal()`: whether `path` lies under the
+/// Document Portal's FUSE mount in `runtime_dir`.
+fn is_document_portal_path(path: &Path, runtime_dir: &Path) -> bool {
+    let mut docportal = runtime_dir.as_os_str().to_owned();
+    docportal.push("/doc/");
+    path.as_os_str()
+        .as_bytes()
+        .starts_with(docportal.as_bytes())
+}
+
+/// Drops the `\x00` suffix early Document Portal versions put on host
+/// paths, as `ptyxis_terminal_get_portal_host_path()` does.
+fn trim_host_path(host_path: &str) -> &str {
+    match host_path.strip_suffix(HOST_PATH_NUL_SUFFIX) {
+        Some(trimmed) if host_path.len() > HOST_PATH_NUL_SUFFIX.len() => trimmed,
+        _ => host_path,
+    }
+}
+
+/// A `text/uri-list` line worth turning into a file: not empty and not a
+/// comment.
+fn uri_list_entry(line: &str) -> Option<&str> {
+    (!line.is_empty() && !line.starts_with('#')).then_some(line)
+}
+
+/// The text `ptyxis_terminal_drop_file_list()` pastes: each item shell
+/// quoted and followed by a space.
+fn quoted_paste_text<I>(items: I) -> String
+where
+    I: IntoIterator,
+    I::Item: AsRef<OsStr>,
+{
+    items
+        .into_iter()
+        .map(|item| {
+            let mut quoted = glib::shell_quote(item).to_string_lossy().into_owned();
+            quoted.push(' ');
+            quoted
+        })
+        .collect()
+}
+
+/// `ptyxis_terminal_get_portal_host_path()`: the real path behind a
+/// Document Portal file, for display.
+fn portal_host_path(file: &gio::File) -> Option<glib::GString> {
+    let info = file
+        .query_info(
+            FILE_ATTRIBUTE_HOST_PATH,
+            gio::FileQueryInfoFlags::NONE,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    let host_path = info.attribute_string(FILE_ATTRIBUTE_HOST_PATH)?;
+    Some(glib::filename_display_name(trim_host_path(&host_path)))
+}
+
+/// What to paste for a dropped file, as in
+/// `ptyxis_terminal_drop_file_list()`: the host path of a Document Portal
+/// file (whose portal path means nothing to the shell), else a local
+/// path, else the URI.
+fn file_paste_item(file: &gio::File) -> std::ffi::OsString {
+    match file.path().filter(|_| file.is_native()) {
+        Some(path) => {
+            if is_document_portal_path(&path, &glib::user_runtime_dir())
+                && let Some(host_path) = portal_host_path(file)
+            {
+                return host_path.as_str().into();
+            }
+            path.into_os_string()
+        }
+        None => file.uri().as_str().into(),
+    }
+}
+
+/// Where the drop highlight goes, as in `ptyxis_terminal_size_allocate()`:
+/// over the terminal and its side padding, inset by a pixel.
+fn drop_highlight_allocation(terminal: &TerminalBox) -> gtk::Allocation {
+    let padding = &terminal.padding;
+    gtk::Allocation::new(
+        -padding.left + 1,
+        1,
+        padding.left - 1 + terminal.width + padding.right - 1,
+        terminal.height - 2,
+    )
+}
 
 /// One side each of a CSS padding or margin, like `GtkBorder` (whose Rust
 /// binding needs GTK initialized, which unit tests do not have).
@@ -106,6 +259,7 @@ mod imp {
     pub struct TerminalWidget {
         hover_uri_revealer: OnceCell<gtk::Revealer>,
         hover_uri_label: OnceCell<gtk::Label>,
+        drop_highlight: OnceCell<adw::Bin>,
         /// Pointer position while it is over the terminal, tracked so the
         /// hover-URI revealer can get out of its way.
         pointer_in_widget: Cell<bool>,
@@ -182,6 +336,50 @@ mod imp {
             ));
             obj.add_controller(motion);
 
+            // `drop_highlight` and `drop_target` from `ptyxis-terminal.ui`,
+            // set up as in `ptyxis_terminal_init()`.
+            let highlight = adw::Bin::builder()
+                .visible(false)
+                .css_classes([DROP_HIGHLIGHT_CSS_CLASS])
+                .build();
+            highlight.set_parent(&*obj);
+            self.drop_highlight
+                .set(highlight)
+                .expect("constructed runs once");
+
+            let formats = gdk::ContentFormatsBuilder::new()
+                .add_type(glib::Type::STRING)
+                .add_type(gdk::FileList::static_type())
+                .add_mime_type(APPLICATION_VND_PORTAL_FILES)
+                .add_mime_type(APPLICATION_VND_PORTAL_FILETRANSFER)
+                .add_mime_type(TEXT_URI_LIST)
+                .add_mime_type(TEXT_X_MOZ_URL)
+                .build();
+            let drop_target = gtk::DropTargetAsync::new(
+                Some(formats),
+                gdk::DragAction::COPY | gdk::DragAction::MOVE,
+            );
+            drop_target.connect_drag_enter(glib::clone!(
+                #[weak(rename_to = this)]
+                self,
+                #[upgrade_or]
+                gdk::DragAction::empty(),
+                move |_, drop, _, _| this.drag_enter(drop)
+            ));
+            drop_target.connect_drag_leave(glib::clone!(
+                #[weak(rename_to = this)]
+                self,
+                move |_, _| this.drop_highlight().set_visible(false)
+            ));
+            drop_target.connect_drop(glib::clone!(
+                #[weak(rename_to = this)]
+                self,
+                #[upgrade_or]
+                false,
+                move |_, drop, _, _| this.drop(drop)
+            ));
+            obj.add_controller(drop_target);
+
             obj.connect_hyperlink_hover_uri_notify(|obj| obj.imp().update_hover_uri());
             self.update_hover_uri();
         }
@@ -190,6 +388,9 @@ mod imp {
             // `gtk_widget_dispose_template()` in `ptyxis_terminal_dispose()`.
             if let Some(revealer) = self.hover_uri_revealer.get() {
                 revealer.unparent();
+            }
+            if let Some(highlight) = self.drop_highlight.get() {
+                highlight.unparent();
             }
         }
     }
@@ -233,6 +434,12 @@ mod imp {
                 &hover_uri_allocation(&terminal, nat.width(), min.height(), pointer_y),
                 -1,
             );
+
+            // The C code measures the highlight but allocates it a fixed
+            // size; measuring keeps GTK from warning about it.
+            let highlight = self.drop_highlight();
+            let _ = highlight.preferred_size();
+            highlight.size_allocate(&drop_highlight_allocation(&terminal), -1);
         }
 
         /// `ptyxis_terminal_snapshot()`: lets rows reach into the top and
@@ -255,6 +462,7 @@ mod imp {
             snapshot.pop();
 
             widget.snapshot_child(self.hover_uri_revealer(), snapshot);
+            widget.snapshot_child(self.drop_highlight(), snapshot);
         }
     }
 
@@ -265,6 +473,41 @@ mod imp {
             self.hover_uri_revealer
                 .get()
                 .expect("revealer is created in constructed")
+        }
+
+        fn drop_highlight(&self) -> &adw::Bin {
+            self.drop_highlight
+                .get()
+                .expect("drop highlight is created in constructed")
+        }
+
+        /// `ptyxis_terminal_drop_target_drag_enter()`.
+        fn drag_enter(&self, drop: &gdk::Drop) -> gdk::DragAction {
+            self.drop_highlight().set_visible(true);
+            drop_action(drop.actions())
+        }
+
+        /// `ptyxis_terminal_drop_target_drop()`: reads the drop in the
+        /// background and pastes it, or declines formats it cannot use.
+        fn drop(&self, drop: &gdk::Drop) -> bool {
+            let Some(request) = DropRequest::for_formats(&drop.formats()) else {
+                return false;
+            };
+            let obj = self.obj().clone();
+            let drop = drop.clone();
+            glib::spawn_future_local(async move {
+                let pasted = match request {
+                    DropRequest::FileList => receive_file_list(&obj, &drop).await,
+                    DropRequest::MozUrl => receive_moz_url(&obj, &drop).await,
+                    DropRequest::String => receive_string(&obj, &drop).await,
+                };
+                drop.finish(if pasted {
+                    drop_action(drop.actions())
+                } else {
+                    gdk::DragAction::empty()
+                });
+            });
+            true
         }
 
         /// `ptyxis_terminal_update_hover_uri()`: shows the link under the
@@ -338,6 +581,142 @@ mod imp {
             };
             snapshot.append_node(root);
         }
+    }
+
+    /// `ptyxis_terminal_drop_file_list()`: pastes the files, quoted.
+    fn paste_files(terminal: &super::TerminalWidget, files: &[gio::File]) {
+        let text = quoted_paste_text(files.iter().map(file_paste_item));
+        if !text.is_empty() {
+            terminal.paste_text(&text);
+        }
+    }
+
+    /// `ptyxis_terminal_drop_file_list_cb()`. Returns whether the drop
+    /// succeeded.
+    async fn receive_file_list(terminal: &super::TerminalWidget, drop: &gdk::Drop) -> bool {
+        let error = match drop
+            .read_value_future(gdk::FileList::static_type(), DROP_REQUEST_PRIORITY)
+            .await
+        {
+            Ok(value) => match value.get::<gdk::FileList>() {
+                Ok(file_list) => {
+                    paste_files(terminal, &file_list.files());
+                    return true;
+                }
+                Err(error) => {
+                    glib::g_debug!("tty-rex", "Unexpected file-list offer: {error}");
+                    return false;
+                }
+            },
+            Err(error) => error,
+        };
+        glib::g_debug!("tty-rex", "Failed to receive file-list offer: {error}");
+
+        // If the user dragged a directory from Nautilus or another
+        // new-style application, a portal request would be made. But GTK
+        // won't be able to open the directory so the request for
+        // APPLICATION_VND_PORTAL_FILETRANSFER will fail. Fall back to
+        // reading TEXT_URI_LIST gracefully.
+        //
+        // The C code checks `G_DBUS_ERROR_ACCESS_DENIED` against the
+        // `G_IO_ERROR` domain, which really matches
+        // `G_IO_ERROR_FILENAME_TOO_LONG` (the same number); kept as is.
+        use glib::translate::IntoGlib;
+        let falls_back = error.kind::<gio::IOErrorEnum>().is_some_and(|kind| {
+            kind == gio::IOErrorEnum::NotFound
+                || kind.into_glib() == gio::ffi::G_DBUS_ERROR_ACCESS_DENIED
+        });
+        falls_back && receive_uri_list(terminal, drop).await
+    }
+
+    /// `ptyxis_terminal_drop_uri_list_cb()`.
+    async fn receive_uri_list(terminal: &super::TerminalWidget, drop: &gdk::Drop) -> bool {
+        let stream = match drop
+            .read_future(&[TEXT_URI_LIST], DROP_REQUEST_PRIORITY)
+            .await
+        {
+            Ok((stream, _mime_type)) => stream,
+            Err(error) => {
+                glib::g_debug!("tty-rex", "Failed to receive text/uri-list offer: {error}");
+                return false;
+            }
+        };
+        let line_reader = gio::DataInputStream::new(&stream);
+        line_reader.set_newline_type(gio::DataStreamNewlineType::CrLf);
+        receive_uri_lines(terminal, &line_reader, TEXT_URI_LIST).await
+    }
+
+    /// `ptyxis_terminal_drop_moz_url_cb()`.
+    async fn receive_moz_url(terminal: &super::TerminalWidget, drop: &gdk::Drop) -> bool {
+        let Ok((stream, _mime_type)) = drop
+            .read_future(&[TEXT_X_MOZ_URL], DROP_REQUEST_PRIORITY)
+            .await
+        else {
+            return false;
+        };
+        let converter = match gio::CharsetConverter::new("UTF-8", "UCS-2") {
+            Ok(converter) => converter,
+            Err(error) => {
+                glib::g_debug!("tty-rex", "Failed to create UTF-8 decoder: {error}");
+                return false;
+            }
+        };
+        // TEXT_X_MOZ_URL is in UCS-2 so convert it to UTF-8.
+        //
+        // The data is expected to be URL, a \n, then the title of the web
+        // page. However, some applications (e.g. dolphin) delimit with a
+        // \r\n (see Ptyxis issue#293) so handle that generically with the
+        // line reader.
+        let converter_stream = gio::ConverterInputStream::new(&stream, &converter);
+        let line_reader = gio::DataInputStream::new(&converter_stream);
+        line_reader.set_newline_type(gio::DataStreamNewlineType::Any);
+        receive_uri_lines(terminal, &line_reader, TEXT_X_MOZ_URL).await
+    }
+
+    /// `ptyxis_terminal_drop_uri_list_line_cb()`: collects a file per URI
+    /// line until the end (only the first line of a `text/x-moz-url`, the
+    /// rest being the page title), then pastes them.
+    async fn receive_uri_lines(
+        terminal: &super::TerminalWidget,
+        line_reader: &gio::DataInputStream,
+        mime_type: &str,
+    ) -> bool {
+        let mut files = Vec::new();
+        loop {
+            let line = match line_reader
+                .read_line_utf8_future(DROP_REQUEST_PRIORITY)
+                .await
+            {
+                Ok(line) => line,
+                Err(error) => {
+                    glib::g_debug!("tty-rex", "Failed to receive '{mime_type}': {error}");
+                    return false;
+                }
+            };
+            if let Some(uri) = line.as_deref().and_then(uri_list_entry) {
+                files.push(gio::File::for_uri(uri));
+            }
+            if line.is_none() || mime_type == TEXT_X_MOZ_URL {
+                paste_files(terminal, &files);
+                return true;
+            }
+        }
+    }
+
+    /// `ptyxis_terminal_drop_string_cb()`.
+    async fn receive_string(terminal: &super::TerminalWidget, drop: &gdk::Drop) -> bool {
+        let Ok(value) = drop
+            .read_value_future(glib::Type::STRING, DROP_REQUEST_PRIORITY)
+            .await
+        else {
+            return false;
+        };
+        if let Ok(Some(text)) = value.get::<Option<String>>()
+            && !text.is_empty()
+        {
+            terminal.paste_text(&text);
+        }
+        true
     }
 
     /// Children of VTE's root container minus the first color node, with
@@ -426,5 +805,144 @@ mod tests {
                 "pointer at {pointer_y:?}"
             );
         }
+    }
+
+    #[test]
+    fn drop_action_prefers_copy() {
+        use gdk::DragAction as A;
+        for (actions, expected) in [
+            (A::COPY | A::MOVE | A::LINK, A::COPY),
+            (A::COPY, A::COPY),
+            (A::MOVE | A::LINK, A::MOVE),
+            (A::LINK, A::empty()),
+            (A::empty(), A::empty()),
+        ] {
+            assert_eq!(drop_action(actions), expected, "{actions:?}");
+        }
+    }
+
+    #[test]
+    fn drop_request_follows_ptyxis_preference() {
+        let file_list = gdk::FileList::static_type();
+        let file = gio::File::static_type();
+        let string = glib::Type::STRING;
+        for (types, mime_types, expected) in [
+            (
+                vec![string, file_list],
+                vec![TEXT_X_MOZ_URL],
+                Some(DropRequest::FileList),
+            ),
+            (vec![file], vec![], Some(DropRequest::FileList)),
+            (vec![], vec![TEXT_URI_LIST], Some(DropRequest::FileList)),
+            (
+                vec![],
+                vec![APPLICATION_VND_PORTAL_FILETRANSFER],
+                Some(DropRequest::FileList),
+            ),
+            (
+                vec![],
+                vec![APPLICATION_VND_PORTAL_FILES],
+                Some(DropRequest::FileList),
+            ),
+            (
+                vec![string],
+                vec![TEXT_X_MOZ_URL],
+                Some(DropRequest::MozUrl),
+            ),
+            (vec![string], vec!["text/html"], Some(DropRequest::String)),
+            (vec![], vec!["image/png"], None),
+        ] {
+            let builder = types
+                .iter()
+                .fold(gdk::ContentFormatsBuilder::new(), |b, t| b.add_type(*t));
+            let formats = mime_types
+                .iter()
+                .fold(builder, |b, m| b.add_mime_type(*m))
+                .build();
+            assert_eq!(
+                DropRequest::for_formats(&formats),
+                expected,
+                "{types:?} {mime_types:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn document_portal_paths() {
+        let runtime = Path::new("/run/user/1000");
+        for (path, expected) in [
+            ("/run/user/1000/doc/a1b2c3/file.txt", true),
+            ("/run/user/1000/doc/", true),
+            ("/run/user/1000/doc", false),
+            ("/run/user/1000/docs/file.txt", false),
+            ("/run/user/1001/doc/a1b2c3/file.txt", false),
+            ("/home/me/file.txt", false),
+        ] {
+            assert_eq!(
+                is_document_portal_path(Path::new(path), runtime),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_path_suffix_is_trimmed() {
+        for (host_path, expected) in [
+            ("/home/me/file.txt\\x00", "/home/me/file.txt"),
+            ("/home/me/file.txt", "/home/me/file.txt"),
+            // Only when something precedes the suffix, as in the C code.
+            ("\\x00", "\\x00"),
+            ("a\\x00", "a"),
+        ] {
+            assert_eq!(trim_host_path(host_path), expected, "{host_path}");
+        }
+    }
+
+    #[test]
+    fn uri_list_entries() {
+        for (line, expected) in [
+            ("file:///tmp/a", Some("file:///tmp/a")),
+            ("# comment", None),
+            ("", None),
+            (" file:///tmp/a", Some(" file:///tmp/a")),
+        ] {
+            assert_eq!(uri_list_entry(line), expected, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn paste_text_is_shell_quoted() {
+        for (items, expected) in [
+            (vec![], ""),
+            (vec!["/tmp/a"], "'/tmp/a' "),
+            (vec!["/tmp/a b", "/tmp/it's"], "'/tmp/a b' '/tmp/it'\\''s' "),
+            (
+                vec!["https://example.com/?q=1"],
+                "'https://example.com/?q=1' ",
+            ),
+        ] {
+            assert_eq!(quoted_paste_text(&items), expected, "{items:?}");
+        }
+    }
+
+    #[test]
+    fn drop_highlight_covers_terminal_and_side_padding() {
+        let terminal = TerminalBox {
+            width: 600,
+            height: 400,
+            padding: Sides {
+                top: 7,
+                right: 6,
+                bottom: 3,
+                left: 6,
+            },
+            margin: Sides::default(),
+        };
+        let alloc = drop_highlight_allocation(&terminal);
+        assert_eq!(
+            (alloc.x(), alloc.y(), alloc.width(), alloc.height()),
+            (-5, 1, 610, 398)
+        );
     }
 }
