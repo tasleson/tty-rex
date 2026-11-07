@@ -24,7 +24,7 @@
 //! they have no messages of their own and the preferences window creates
 //! one per palette.
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -40,12 +40,12 @@ const SAMPLE_TEXT: &str = "The quick brown fox jumps over the lazy dog";
 const PREVIEW_COLOR_INDEXES: std::ops::RangeInclusive<usize> = 1..=6;
 
 /// Fills a drawing area with a color that can change later.
-fn color_area(css_name: &str) -> (gtk::DrawingArea, Rc<RefCell<Option<gdk::RGBA>>>) {
-    let color = Rc::new(RefCell::new(None::<gdk::RGBA>));
+fn color_area(css_name: &str) -> (gtk::DrawingArea, Rc<Cell<Option<gdk::RGBA>>>) {
+    let color: Rc<Cell<Option<gdk::RGBA>>> = Rc::default();
     let area = gtk::DrawingArea::builder().css_name(css_name).build();
     let draw_color = Rc::clone(&color);
     area.set_draw_func(move |_, cr, width, height| {
-        if let Some(c) = *draw_color.borrow() {
+        if let Some(c) = draw_color.get() {
             cr.set_source_rgba(
                 c.red().into(),
                 c.green().into(),
@@ -64,7 +64,7 @@ fn color_area(css_name: &str) -> (gtk::DrawingArea, Rc<RefCell<Option<gdk::RGBA>
 #[derive(Debug, Clone)]
 pub struct ColorSwatch {
     area: gtk::DrawingArea,
-    color: Rc<RefCell<Option<gdk::RGBA>>>,
+    color: Rc<Cell<Option<gdk::RGBA>>>,
     index: usize,
 }
 
@@ -75,7 +75,7 @@ impl ColorSwatch {
         area.set_has_tooltip(true);
         let tooltip_color = Rc::clone(&color);
         area.connect_query_tooltip(move |_, _, _, _, tooltip| {
-            let Some(color) = *tooltip_color.borrow() else {
+            let Some(color) = tooltip_color.get() else {
                 return false;
             };
             tooltip.set_text(Some(&color.to_str()));
@@ -89,8 +89,8 @@ impl ColorSwatch {
     }
 
     pub fn set_palette(&self, palette: Option<&Palette>, dark: bool) {
-        *self.color.borrow_mut() =
-            palette.and_then(|p| p.face(dark).indexed.get(self.index).copied());
+        self.color
+            .set(palette.and_then(|p| p.face(dark).indexed.get(self.index).copied()));
         self.area.queue_draw();
     }
 }
@@ -100,12 +100,12 @@ impl ColorSwatch {
 #[derive(Debug, Clone)]
 pub struct PalettePreview {
     root: gtk::Overlay,
-    background: Rc<RefCell<Option<gdk::RGBA>>>,
+    background: Rc<Cell<Option<gdk::RGBA>>>,
     background_area: gtk::DrawingArea,
     label: gtk::Label,
     swatches: Vec<ColorSwatch>,
     palette: Rc<Palette>,
-    font: Rc<RefCell<Option<pango::FontDescription>>>,
+    font: Option<pango::FontDescription>,
 }
 
 impl PalettePreview {
@@ -172,7 +172,7 @@ impl PalettePreview {
             label,
             swatches,
             palette: Rc::clone(palette),
-            font: Rc::new(RefCell::new(font.cloned())),
+            font: font.cloned(),
         };
         preview.set_dark(dark);
         preview
@@ -188,7 +188,7 @@ impl PalettePreview {
 
     pub fn set_dark(&self, dark: bool) {
         let face = self.palette.face(dark);
-        *self.background.borrow_mut() = Some(face.background);
+        self.background.set(Some(face.background));
         self.background_area.queue_draw();
         for swatch in &self.swatches {
             swatch.set_palette(Some(&self.palette), dark);
@@ -198,7 +198,7 @@ impl PalettePreview {
 
     fn update_label(&self, dark: bool) {
         let attrs = pango::AttrList::new();
-        if let Some(font) = self.font.borrow().as_ref() {
+        if let Some(font) = &self.font {
             attrs.insert(pango::AttrFontDesc::new(font));
         }
         let fg = self.palette.face(dark).foreground;
