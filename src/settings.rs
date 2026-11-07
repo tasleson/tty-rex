@@ -42,6 +42,7 @@ pub mod key {
     pub const DEFAULT_PROFILE_UUID: &str = "default-profile-uuid";
     pub const DEFAULT_ROWS: &str = "default-rows";
     pub const DISABLE_DYNAMIC_TITLE: &str = "disable-dynamic-title";
+    pub const DISABLE_PADDING: &str = "disable-padding";
     pub const ENABLE_A11Y: &str = "enable-a11y";
     pub const FONT_NAME: &str = "font-name";
     pub const IGNORE_OSC_TITLE: &str = "ignore-osc-title";
@@ -68,6 +69,7 @@ pub mod key {
         DEFAULT_PROFILE_UUID,
         DEFAULT_ROWS,
         DISABLE_DYNAMIC_TITLE,
+        DISABLE_PADDING,
         ENABLE_A11Y,
         FONT_NAME,
         IGNORE_OSC_TITLE,
@@ -555,6 +557,12 @@ impl AppSettings {
         self.settings.boolean(key::AUDIBLE_BELL)
     }
 
+    /// Whether terminals drop the `padded` style class
+    /// (`ptyxis_settings_get_disable_padding()`).
+    pub fn disable_padding(&self) -> bool {
+        self.settings.boolean(key::DISABLE_PADDING)
+    }
+
     pub fn ignore_osc_title(&self) -> bool {
         self.settings.boolean(key::IGNORE_OSC_TITLE)
     }
@@ -989,6 +997,24 @@ pub(crate) mod tests {
     fn missing_schema_is_an_error() {
         let err = open("org.gnome.Ptyxis.DoesNotExist", None, &[]).unwrap_err();
         assert!(err.to_string().contains("org.gnome.Ptyxis.DoesNotExist"));
+    }
+
+    #[test]
+    fn disable_padding_round_trip() {
+        if expected_schema(config::SCHEMA_ID).is_none() {
+            return;
+        }
+        use_memory_backend();
+        let settings = AppSettings::new().unwrap();
+        // Ptyxis pads terminals unless told otherwise.
+        assert!(!settings.disable_padding());
+        for disable in [true, false] {
+            settings
+                .gsettings()
+                .set_boolean(key::DISABLE_PADDING, disable)
+                .unwrap();
+            assert_eq!(settings.disable_padding(), disable);
+        }
     }
 
     #[test]

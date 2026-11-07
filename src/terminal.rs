@@ -93,13 +93,23 @@ pub fn create() -> vte::Terminal {
     terminal
 }
 
-/// Applies application-wide settings (font, cursor, bell).
+/// Style class from `style.css` that pads the terminal so its grid sits
+/// clear of the window's rounded corners.
+const PADDED_CSS_CLASS: &str = "padded";
+
+/// Applies application-wide settings (font, cursor, bell, padding).
 pub fn apply_app_settings(terminal: &vte::Terminal, settings: &AppSettings) {
     terminal.set_audible_bell(settings.audible_bell());
     terminal.set_cursor_shape(settings.cursor_shape().into());
     terminal.set_cursor_blink_mode(settings.cursor_blink_mode().into());
     terminal.set_text_blink_mode(settings.text_blink_mode().into());
     terminal.set_font(Some(&settings.font_desc()));
+    // Like ptyxis_tab_update_padding_cb().
+    if settings.disable_padding() {
+        terminal.remove_css_class(PADDED_CSS_CLASS);
+    } else {
+        terminal.add_css_class(PADDED_CSS_CLASS);
+    }
 }
 
 /// Applies per-profile behavior (scrollback, scrolling, spacing).
