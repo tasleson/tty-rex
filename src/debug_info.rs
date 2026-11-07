@@ -252,6 +252,15 @@ pub fn os_name_from_release(contents: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
+/// The contents of `path`, if readable. Ptyxis appends the raw bytes;
+/// invalid UTF-8 is replaced rather than dropping the whole file, as the
+/// About dialog can only show text.
+pub fn read_text(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// The files describing the system: the `vte.sh` and `os-release` of the
 /// host, which a Flatpak sandbox sees under `/var/run/host`.
 pub fn system_paths(in_sandbox: bool) -> (&'static Path, &'static Path) {

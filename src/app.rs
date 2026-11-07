@@ -225,7 +225,8 @@ relm4::new_stateful_action!(
 const ICON_NAME: &str = "io.github.tasleson.TtyRex";
 /// tty-rex is ported from Ptyxis, so the About dialog credits its author
 /// and keeps its copyright (`ptyxis_application_about()`).
-const PTYXIS_DEVELOPER: &str = "Christian Hergert";
+const CREDIT_C_CODE: &str = "C code by Christian Hergert";
+const CREDIT_RUST_PORT: &str = "Rust port by Tony Asleson & Agentic Coding";
 const COPYRIGHT: &str = "© 2023-2024 Christian Hergert, et al.";
 const BASED_ON_TITLE: &str = "Based on";
 const PTYXIS_CREDIT: &str = "Ptyxis by Christian Hergert https://gitlab.gnome.org/chergert/ptyxis";
@@ -779,7 +780,7 @@ impl App {
             .application_name(config::APP_NAME)
             .application_icon(icon)
             .version(config::PACKAGE_VERSION)
-            .developers([PTYXIS_DEVELOPER])
+            .developers([CREDIT_C_CODE, CREDIT_RUST_PORT])
             .copyright(COPYRIGHT)
             .license_type(gtk::License::Gpl30)
             .website(config::WEBSITE)
@@ -797,8 +798,9 @@ impl App {
         let (vte_sh, os_release_path) = debug_info::system_paths(in_sandbox);
         // Ptyxis's agent reads the name from the host's `os-release`, which
         // a sandbox sees under `/var/run/host`.
-        let os_release = std::fs::read_to_string(os_release_path).ok();
-        let flatpak_info = std::fs::read_to_string(debug_info::FLATPAK_INFO_PATH).ok();
+        let os_release = debug_info::read_text(os_release_path);
+        let flatpak_info =
+            debug_info::read_text(std::path::Path::new(debug_info::FLATPAK_INFO_PATH));
         let display = gdk::Display::default();
         let ((vte_major, vte_minor, vte_micro), vte_features) = debug_info::vte_runtime_version();
         let containers = self
@@ -820,7 +822,8 @@ impl App {
                 .and_then(debug_info::os_name_from_release),
             uname: debug_info::uname(),
             in_sandbox,
-            desktop_session: std::env::var("DESKTOP_SESSION").ok(),
+            desktop_session: std::env::var_os("DESKTOP_SESSION")
+                .map(|s| s.to_string_lossy().into_owned()),
             glib: LibraryVersion {
                 runtime: debug_info::glib_runtime_version(),
                 compiled: config::BUILD_GLIB_VERSION.to_owned(),
