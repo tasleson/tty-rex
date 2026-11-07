@@ -62,6 +62,9 @@ const SHORTCUT_LABEL_PAGE: &str = "label";
 const SHOW_ALL_PALETTES: (&str, &str) = ("Show All Palettes", "down-small-symbolic");
 const SHOW_FEWER_PALETTES: (&str, &str) = ("Show Fewer Palettes", "up-small-symbolic");
 
+const RESET_COLORS_LABEL: &str = "Reset Colors";
+const RESET_COLORS_TOOLTIP: &str = "Use the palette colors for superuser and remote sessions";
+
 /// Picks the palette highlight a color setting replaces.
 type HighlightOf = fn(&Face) -> &Scarf;
 
@@ -973,6 +976,27 @@ fn highlight_group(
 
     let group = widgets::group(Some("Session Highlighting"));
     group.add(&enabled);
+    let reset = gtk::Button::builder()
+        .label(RESET_COLORS_LABEL)
+        .tooltip_text(RESET_COLORS_TOOLTIP)
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    gsettings
+        .bind(key::VISUAL_PROCESS_LEADER, &reset, "sensitive")
+        .get()
+        .build();
+    reset.connect_clicked({
+        let settings = settings.clone();
+        move |_| {
+            for key in tty_rex_key::COLOR_KEYS {
+                if let Err(e) = settings.set_color_override(key, None) {
+                    glib::g_warning!("tty-rex", "Cannot reset {key}: {e}");
+                }
+            }
+        }
+    });
+    group.set_header_suffix(Some(&reset));
     let rows = HIGHLIGHT_ROWS
         .iter()
         .map(|&(title, subtitle, setting, highlight_of)| {
