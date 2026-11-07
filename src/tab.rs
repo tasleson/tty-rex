@@ -227,6 +227,49 @@ fn color_dot_icon(color: &gdk::RGBA) -> gio::Icon {
     gio::BytesIcon::new(&glib::Bytes::from_owned(color_dot_svg(color).into_bytes())).upcast()
 }
 
+/// Capture-phase scroll controller that turns Ctrl+scroll into zoom
+/// (`on_scroll_scrolled_cb()` and friends, set up in `ptyxis_tab_init()`).
+///
+/// Ctrl+scroll is swallowed even when `enable-zoom-scroll-ctrl` is off, so
+/// the terminal never scrolls its scrollback with Ctrl held.
+fn zoom_scroll_controller(
+    app_settings: AppSettings,
+    input: relm4::Sender<TabInput>,
+) -> gtk::EventControllerScroll {
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+    scroll.connect_scroll(move |scroll, _dx, dy| {
+        if !scroll
+            .current_event_state()
+            .contains(gdk::ModifierType::CONTROL_MASK)
+        {
+            return glib::Propagation::Proceed;
+        }
+        if app_settings.enable_zoom_scroll_ctrl() {
+            input.emit(TabInput::ScrollZoom(dy));
+        }
+        glib::Propagation::Stop
+    });
+    // Smooth (touchpad) scrolls started with Ctrl held zoom one step per
+    // discrete notch instead of per pixel (`on_scroll_begin_cb()`).
+    scroll.connect_scroll_begin(|scroll| {
+        if scroll
+            .current_event_state()
+            .contains(gdk::ModifierType::CONTROL_MASK)
+        {
+            scroll.set_flags(
+                gtk::EventControllerScrollFlags::VERTICAL
+                    | gtk::EventControllerScrollFlags::DISCRETE,
+            );
+        }
+    });
+    // `on_scroll_end_cb()`.
+    scroll.connect_scroll_end(|scroll| {
+        scroll.set_flags(gtk::EventControllerScrollFlags::VERTICAL);
+    });
+    scroll
+}
+
 /// Whether a key press likely starts or ends a program, so the leader
 /// should be checked soon (`ptyxis_tab_monitor_key_pressed_cb()`).
 fn is_interactive_key(key: gdk::Key, state: gdk::ModifierType) -> bool {
@@ -676,6 +719,8 @@ pub enum TabInput {
     Bell,
     ZoomIn,
     ZoomOut,
+    /// A Ctrl+scroll by this vertical delta.
+    ScrollZoom(f64),
     ZoomReset,
     Copy,
     Paste,
@@ -1167,6 +1212,10 @@ impl Component for Tab {
             }
         });
         root.add_controller(focus);
+        root.add_controller(zoom_scroll_controller(
+            init.app_settings.clone(),
+            sender.input_sender().clone(),
+        ));
 
         terminal.set_context_menu_model(Some(&context_menu()));
         let links = Links::default();
@@ -1439,6 +1488,7 @@ impl Component for Tab {
             }
             TabInput::ZoomIn => self.set_zoom(self.zoom.get().zoom_in()),
             TabInput::ZoomOut => self.set_zoom(self.zoom.get().zoom_out()),
+            TabInput::ScrollZoom(dy) => self.set_zoom(self.zoom.get().scrolled(dy)),
             TabInput::ZoomReset => self.set_zoom(ZoomLevel::DEFAULT),
             TabInput::Copy => self.terminal.copy_clipboard_format(vte::Format::Text),
             TabInput::Paste => self.terminal.paste_clipboard(),

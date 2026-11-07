@@ -61,6 +61,18 @@ impl ZoomLevel {
         Self((self.0 - 1).max(Self::MIN.0))
     }
 
+    /// The level after a Ctrl+scroll of `dy`: scrolling up zooms in,
+    /// down zooms out, as in `on_scroll_scrolled_cb()`.
+    pub fn scrolled(self, dy: f64) -> Self {
+        if dy < 0.0 {
+            self.zoom_in()
+        } else if dy > 0.0 {
+            self.zoom_out()
+        } else {
+            self
+        }
+    }
+
     /// The `PtyxisZoomLevel` value, which numbers the steps from 1
     /// (`PTYXIS_ZOOM_LEVEL_MINUS_14`), as stored in the session file.
     pub fn to_ptyxis_enum(self) -> u32 {
@@ -370,6 +382,21 @@ mod tests {
         assert_eq!(ZoomLevel::MAX.zoom_in(), ZoomLevel::MAX);
         assert_eq!(ZoomLevel::MIN.zoom_out(), ZoomLevel::MIN);
         assert_eq!(ZoomLevel::DEFAULT.zoom_in().zoom_out(), ZoomLevel::DEFAULT);
+    }
+
+    #[test]
+    fn zoom_scrolled() {
+        let cases = [
+            (ZoomLevel::DEFAULT, -1.0, ZoomLevel(1)),
+            (ZoomLevel::DEFAULT, -0.25, ZoomLevel(1)),
+            (ZoomLevel::DEFAULT, 1.0, ZoomLevel(-1)),
+            (ZoomLevel::DEFAULT, 0.0, ZoomLevel::DEFAULT),
+            (ZoomLevel::MAX, -1.0, ZoomLevel::MAX),
+            (ZoomLevel::MIN, 1.0, ZoomLevel::MIN),
+        ];
+        for (level, dy, expected) in cases {
+            assert_eq!(level.scrolled(dy), expected, "{level:?} dy={dy}");
+        }
     }
 
     #[test]

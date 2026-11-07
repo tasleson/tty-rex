@@ -44,6 +44,7 @@ pub mod key {
     pub const DISABLE_DYNAMIC_TITLE: &str = "disable-dynamic-title";
     pub const DISABLE_PADDING: &str = "disable-padding";
     pub const ENABLE_A11Y: &str = "enable-a11y";
+    pub const ENABLE_ZOOM_SCROLL_CTRL: &str = "enable-zoom-scroll-ctrl";
     pub const FONT_NAME: &str = "font-name";
     pub const IGNORE_OSC_TITLE: &str = "ignore-osc-title";
     pub const INHIBIT_LOGOUT: &str = "inhibit-logout";
@@ -71,6 +72,7 @@ pub mod key {
         DISABLE_DYNAMIC_TITLE,
         DISABLE_PADDING,
         ENABLE_A11Y,
+        ENABLE_ZOOM_SCROLL_CTRL,
         FONT_NAME,
         IGNORE_OSC_TITLE,
         INHIBIT_LOGOUT,
@@ -563,6 +565,12 @@ impl AppSettings {
         self.settings.boolean(key::DISABLE_PADDING)
     }
 
+    /// Whether Ctrl+scroll zooms the terminal
+    /// (`ptyxis_settings_get_enable_zoom_scroll_ctrl()`).
+    pub fn enable_zoom_scroll_ctrl(&self) -> bool {
+        self.settings.boolean(key::ENABLE_ZOOM_SCROLL_CTRL)
+    }
+
     pub fn ignore_osc_title(&self) -> bool {
         self.settings.boolean(key::IGNORE_OSC_TITLE)
     }
@@ -1000,20 +1008,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn disable_padding_round_trip() {
+    fn boolean_keys_round_trip() {
         if expected_schema(config::SCHEMA_ID).is_none() {
             return;
         }
         use_memory_backend();
         let settings = AppSettings::new().unwrap();
-        // Ptyxis pads terminals unless told otherwise.
-        assert!(!settings.disable_padding());
-        for disable in [true, false] {
-            settings
-                .gsettings()
-                .set_boolean(key::DISABLE_PADDING, disable)
-                .unwrap();
-            assert_eq!(settings.disable_padding(), disable);
+        type Getter = fn(&AppSettings) -> bool;
+        // (key, getter, Ptyxis default)
+        let cases: &[(&str, Getter, bool)] = &[
+            // Ptyxis pads terminals unless told otherwise.
+            (key::DISABLE_PADDING, AppSettings::disable_padding, false),
+            // Ctrl+scroll zooms by default.
+            (
+                key::ENABLE_ZOOM_SCROLL_CTRL,
+                AppSettings::enable_zoom_scroll_ctrl,
+                true,
+            ),
+        ];
+        for &(name, get, default) in cases {
+            assert_eq!(get(&settings), default, "{name} default");
+            for value in [!default, default] {
+                settings.gsettings().set_boolean(name, value).unwrap();
+                assert_eq!(get(&settings), value, "{name}");
+            }
         }
     }
 
