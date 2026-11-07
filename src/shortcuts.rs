@@ -55,6 +55,7 @@ pub mod key {
     /// In tty-rex's own schema (see [`super::TTY_REX_KEYS`]).
     pub const TOGGLE_TELEMETRY: &str = "toggle-telemetry";
     pub const TAB_OVERVIEW: &str = "tab-overview";
+    pub const UNDO_CLOSE_TAB: &str = "undo-close-tab";
     pub const ZOOM_IN: &str = "zoom-in";
     pub const ZOOM_ONE: &str = "zoom-one";
     pub const ZOOM_OUT: &str = "zoom-out";
@@ -79,6 +80,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     (key::SET_TITLE, "win.set-title"),
     (key::TOGGLE_TELEMETRY, "win.toggle-telemetry"),
     (key::TAB_OVERVIEW, "win.tab-overview"),
+    (key::UNDO_CLOSE_TAB, "win.undo-close-tab"),
     (key::ZOOM_IN, "win.zoom-in"),
     (key::ZOOM_ONE, "win.zoom-one"),
     (key::ZOOM_OUT, "win.zoom-out"),
@@ -518,8 +520,8 @@ mod tests {
         CloseOtherTabsAction, CloseTabAction, CopyAction, DetachTabAction, MoveTabLeftAction,
         MoveTabRightAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
         PreferencesAction, PreviousTabAction, SearchAction, SetTitleAction,
-        ShowKeyboardShortcutsAction, TabOverviewAction, ToggleTelemetryAction, ZoomInAction,
-        ZoomOneAction, ZoomOutAction,
+        ShowKeyboardShortcutsAction, TabOverviewAction, ToggleTelemetryAction, UndoCloseTabAction,
+        ZoomInAction, ZoomOneAction, ZoomOutAction,
     };
     use relm4::actions::ActionName;
 
@@ -582,6 +584,7 @@ mod tests {
             (key::SET_TITLE, SetTitleAction::action_name()),
             (key::TOGGLE_TELEMETRY, ToggleTelemetryAction::action_name()),
             (key::TAB_OVERVIEW, TabOverviewAction::action_name()),
+            (key::UNDO_CLOSE_TAB, UndoCloseTabAction::action_name()),
             (key::ZOOM_IN, ZoomInAction::action_name()),
             (key::ZOOM_ONE, ZoomOneAction::action_name()),
             (key::ZOOM_OUT, ZoomOutAction::action_name()),

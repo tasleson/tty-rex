@@ -57,6 +57,8 @@ use crate::window::{SetTitleAction, TOGGLE_TELEMETRY_LABEL, ToggleTelemetryActio
 const QUICK_EXIT_THRESHOLD: Duration = Duration::from_millis(500);
 
 const DEFAULT_TITLE: &str = "Terminal";
+/// Banner title after the process ends normally.
+const PROCESS_EXITED_TITLE: &str = "Process Exited";
 const RESTART_LABEL: &str = "_Restart";
 const EDIT_PROFILE_LABEL: &str = "Edit Profile";
 /// Application action opening the profile editor (`app.edit-profile`).
@@ -128,7 +130,7 @@ pub fn exit_outcome(
     match action {
         ExitAction::Restart => ExitOutcome::Restart,
         ExitAction::Close => ExitOutcome::Close,
-        ExitAction::None => ExitOutcome::ShowBanner("Process Exited".to_owned()),
+        ExitAction::None => ExitOutcome::ShowBanner(PROCESS_EXITED_TITLE.to_owned()),
     }
 }
 
@@ -430,6 +432,8 @@ pub enum TabInput {
     ResetColor,
     /// The tab left its window, e.g. to move to another one.
     Unrealized,
+    /// The tab was reopened after being closed (`win.undo-close-tab`).
+    Restored,
 }
 
 pub struct Tab {
@@ -646,13 +650,18 @@ impl Tab {
         }
     }
 
-    fn show_banner(&mut self, title: &str, action: BannerAction) {
+    /// Sets up the banner without showing it.
+    fn prepare_banner(&mut self, title: &str, action: BannerAction) {
         self.banner.set_title(title);
         self.banner.set_button_label(Some(match action {
             BannerAction::Restart => RESTART_LABEL,
             BannerAction::EditProfile => EDIT_PROFILE_LABEL,
         }));
         self.banner_action = action;
+    }
+
+    fn show_banner(&mut self, title: &str, action: BannerAction) {
+        self.prepare_banner(title, action);
         self.banner.set_visible(true);
     }
 
@@ -730,6 +739,9 @@ impl Tab {
         ) {
             ExitOutcome::Restart => self.respawn(sender),
             ExitOutcome::Close => {
+                // Like ptyxis_tab_wait_cb(), prepare the banner anyway: the
+                // tab can come back through `win.undo-close-tab`.
+                self.prepare_banner(PROCESS_EXITED_TITLE, BannerAction::Restart);
                 if let Some((tab_view, page)) = find_page(root) {
                     tab_view.set_page_pinned(&page, false);
                     tab_view.close_page(&page);
@@ -1055,6 +1067,13 @@ impl Component for Tab {
                 }
             }
             TabInput::ResetColor => self.set_color(None),
+            TabInput::Restored => {
+                // A tab closed because its process ended shows why when it
+                // comes back (ptyxis_window_undo_close_tab_action()).
+                if matches!(self.state, TabState::Exited | TabState::Failed) {
+                    self.banner.set_visible(true);
+                }
+            }
             TabInput::Unrealized => {
                 // A tab moved to another window (e.g. by the detach-tab
                 // shortcut, which the dialog does not block) would leave its

@@ -407,6 +407,23 @@ impl App {
         self.tabs.borrow_mut().remove(child);
     }
 
+    /// Kills a closed tab's process and drops the tab once it can no longer
+    /// be reopened (`ptyxis_tab_force_quit()`). Unlike an ordinary close,
+    /// which leaves the hangup to VTE, a parked tab's program may have
+    /// ignored that, so it gets `SIGKILL` like in Ptyxis.
+    pub fn force_quit_tab(&self, child: &gtk::Widget) {
+        let Some(handle) = self.tabs.borrow_mut().remove(child) else {
+            return;
+        };
+        if let Some(pid) = handle.child_pid.get() {
+            // SAFETY: kill() has no memory-safety preconditions.
+            if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+                let e = std::io::Error::last_os_error();
+                glib::g_debug!("tty-rex", "Cannot kill process {pid}: {e}");
+            }
+        }
+    }
+
     pub fn new_window(self: &Rc<Self>) -> WindowRef {
         self.launch_window(false)
     }

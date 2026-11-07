@@ -25,7 +25,7 @@
 //! factory owned by one window cannot follow. The window only inserts
 //! pages and looks tabs up by their root widget.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -38,6 +38,7 @@ use crate::app::{App, TabRef, TabRequest};
 use crate::config;
 use crate::container::Container;
 use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
+use crate::parking_lot::{self, ParkingLot};
 use crate::settings::NewTabPosition;
 use crate::shortcuts::Shortcuts;
 use crate::telemetry_bar::{TelemetryBar, TelemetryBarInput};
@@ -90,6 +91,7 @@ relm4::new_stateful_action!(
 relm4::new_stateless_action!(pub NewWindowAction, WindowActions, "new-window");
 relm4::new_stateless_action!(pub CloseTabAction, WindowActions, "close-tab");
 relm4::new_stateless_action!(pub CloseOtherTabsAction, WindowActions, "close-other-tabs");
+relm4::new_stateless_action!(pub UndoCloseTabAction, WindowActions, "undo-close-tab");
 relm4::new_stateless_action!(pub MoveTabLeftAction, WindowActions, "move-tab-left");
 relm4::new_stateless_action!(pub MoveTabRightAction, WindowActions, "move-tab-right");
 relm4::new_stateless_action!(pub DetachTabAction, WindowActions, "detach-tab");
@@ -147,6 +149,9 @@ pub enum WindowInput {
     NewWindow,
     CloseTab,
     CloseOtherTabs,
+    UndoCloseTab,
+    /// The closed tab parked under this serial can no longer be reopened.
+    ParkedTabExpired(parking_lot::Serial),
     MoveTabLeft,
     MoveTabRight,
     DetachTab,
@@ -218,6 +223,9 @@ pub struct Window {
     /// must not save the session again (`in_close_request`).
     in_close_request: Rc<Cell<bool>>,
     single_terminal: bool,
+    /// Closed tabs that `win.undo-close-tab` can still reopen; shared with
+    /// the close-request handler, which releases them with the window.
+    parked: Rc<RefCell<ParkingLot<gtk::Widget>>>,
 }
 
 /// Registers a parameterless action that forwards `message` to the window
@@ -318,8 +326,42 @@ impl Window {
             if !self.in_close_request.get() && !self.single_terminal {
                 self.app.save_session();
             }
+            release_parked(&self.app, &self.parked);
             self.window.destroy();
         }
+    }
+
+    /// Keeps a closed tab alive for a few seconds so it can be reopened
+    /// (`ptyxis_window_close_page_cb()`). A standalone `-x` window has no
+    /// `win.undo-close-tab`, and tabs of a window that is closing as a whole
+    /// were released already.
+    fn park_tab(&self, child: gtk::Widget) {
+        if self.single_terminal || self.in_close_request.get() || self.app.tab(&child).is_none() {
+            self.app.remove_tab(&child);
+            return;
+        }
+        let serial = self.parked.borrow_mut().push(child);
+        let input = self.input.clone();
+        glib::timeout_add_local_once(parking_lot::DEFAULT_TIMEOUT, move || {
+            // The window may be gone, taking its parked tabs with it.
+            let _ = input.send(WindowInput::ParkedTabExpired(serial));
+        });
+    }
+
+    /// Reopens the most recently closed tab where new tabs go
+    /// (`ptyxis_window_undo_close_tab_action()`).
+    fn undo_close_tab(&self) {
+        let Some(child) = self.parked.borrow_mut().pop() else {
+            return;
+        };
+        let Some(tab) = self.app.tab(&child) else {
+            return;
+        };
+        let page = self
+            .tab_view
+            .insert(&child, new_tab_position(&self.app, &self.tab_view));
+        self.tab_view.set_selected_page(&page);
+        tab.sender.emit(crate::tab::TabInput::Restored);
     }
 
     fn on_selected_page_changed(&mut self) {
@@ -432,13 +474,18 @@ fn insert_tab(
         request.grid_size = Some(app.settings().initial_grid_size());
     }
     let child = app.create_tab(request)?;
-    let position = match (app.settings().new_tab_position(), tab_view.selected_page()) {
-        (NewTabPosition::Next, Some(page)) => tab_view.page_position(&page) + 1,
-        _ => tab_view.n_pages(),
-    };
-    let page = tab_view.insert(&child, position);
+    let page = tab_view.insert(&child, new_tab_position(app, tab_view));
     tab_view.set_selected_page(&page);
     Ok(page)
+}
+
+/// Where a new or reopened tab goes, after the selected one or last
+/// depending on `new-tab-position` (`ptyxis_window_add_tab()`).
+fn new_tab_position(app: &App, tab_view: &adw::TabView) -> i32 {
+    match (app.settings().new_tab_position(), tab_view.selected_page()) {
+        (NewTabPosition::Next, Some(page)) => tab_view.page_position(&page) + 1,
+        _ => tab_view.n_pages(),
+    }
 }
 
 /// Adds `win.interface-style` and the theme selector to the primary menu
@@ -500,6 +547,16 @@ fn add_theme_controls(
 fn release_tabs(app: &App, tab_view: &adw::TabView) {
     for i in 0..tab_view.n_pages() {
         app.remove_tab(&tab_view.nth_page(i).child());
+    }
+}
+
+/// Ends the closed tabs of a window that is going away, which can no
+/// longer be reopened (`ptyxis_parking_lot_dispose()`).
+fn release_parked(app: &App, parked: &RefCell<ParkingLot<gtk::Widget>>) {
+    // Collected first so no borrow is held while tabs are dropped.
+    let children: Vec<_> = parked.borrow_mut().drain().collect();
+    for child in children {
+        app.force_quit_tab(&child);
     }
 }
 
@@ -785,6 +842,10 @@ impl Component for Window {
         add_action::<NewWindowAction>(&window, &sender, || WindowInput::NewWindow);
         add_action::<CloseTabAction>(&window, &sender, || WindowInput::CloseTab);
         add_action::<CloseOtherTabsAction>(&window, &sender, || WindowInput::CloseOtherTabs);
+        // A standalone -x window ends with its only tab, so there is
+        // nothing to reopen (`single_terminal_mode`).
+        add_action::<UndoCloseTabAction>(&window, &sender, || WindowInput::UndoCloseTab)
+            .set_enabled(!single_terminal);
         add_action::<MoveTabLeftAction>(&window, &sender, || WindowInput::MoveTabLeft);
         add_action::<MoveTabRightAction>(&window, &sender, || WindowInput::MoveTabRight);
         add_action::<DetachTabAction>(&window, &sender, || WindowInput::DetachTab);
@@ -884,6 +945,8 @@ impl Component for Window {
         let weak_tab_view = tab_view.downgrade();
         let in_close_request = Rc::new(Cell::new(false));
         let closing = Rc::clone(&in_close_request);
+        let parked = Rc::new(RefCell::new(ParkingLot::default()));
+        let closing_parked = Rc::clone(&parked);
         window.connect_close_request(move |window| {
             closing.set(true);
             if let (Some(app), Some(tab_view)) = (weak_app.upgrade(), weak_tab_view.upgrade()) {
@@ -891,6 +954,7 @@ impl Component for Window {
                     app.save_session();
                 }
                 release_tabs(&app, &tab_view);
+                release_parked(&app, &closing_parked);
             }
             glib::Propagation::Proceed
         });
@@ -917,6 +981,7 @@ impl Component for Window {
             overview_close_serial: 0,
             in_close_request,
             single_terminal,
+            parked,
         };
         ComponentParts { model, widgets: () }
     }
@@ -952,6 +1017,13 @@ impl Component for Window {
             WindowInput::CloseOtherTabs => {
                 if let Some(page) = self.tab_view.selected_page() {
                     self.tab_view.close_other_pages(&page);
+                }
+            }
+            WindowInput::UndoCloseTab => self.undo_close_tab(),
+            WindowInput::ParkedTabExpired(serial) => {
+                let expired = self.parked.borrow_mut().expire(serial);
+                if let Some(child) = expired {
+                    self.app.force_quit_tab(&child);
                 }
             }
             WindowInput::MoveTabLeft => self.move_selected_tab(adw::TabView::reorder_backward),
@@ -1026,7 +1098,7 @@ impl Component for Window {
                 transferring,
             } => {
                 if !transferring {
-                    self.app.remove_tab(&child);
+                    self.park_tab(child);
                     self.close_if_empty();
                 }
             }

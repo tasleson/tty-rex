@@ -41,6 +41,12 @@ state is kept in `~/.config/<app-id>/session.gvariant`, in the same format
 as Ptyxis's but separate from it, so the two do not overwrite each other's
 session.
 
+A closed tab keeps running for five seconds, during which "Undo Close
+Tab" (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>T</kbd> by
+default) reopens it. When several tabs were closed, tty-rex reopens the
+most recent one first, as the shortcut's description says; Ptyxis
+reopens the oldest.
+
 Beyond Ptyxis, "Show Telemetry" in the terminal's context menu
 (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> by default) toggles a footer
 with the network (TCP only), CPU and memory use of the processes started
