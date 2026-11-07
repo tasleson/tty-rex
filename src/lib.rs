@@ -47,6 +47,7 @@ pub mod palette;
 pub mod palette_preview;
 pub mod preferences;
 pub mod profile;
+pub mod proxy;
 pub mod settings;
 pub mod shortcuts;
 pub mod spawn;

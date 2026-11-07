@@ -31,8 +31,8 @@
 //!
 //! An agent-backed spawner will need more than the trait carries today:
 //! the target container id (the agent's `CreateProcess` runs inside a
-//! container), extra environment such as proxy settings, and a way to
-//! cancel an in-flight spawn when the tab closes first.
+//! container) and a way to cancel an in-flight spawn when the tab closes
+//! first.
 
 use std::cell::{OnceCell, RefCell};
 use std::os::unix::fs::PermissionsExt;
@@ -45,6 +45,7 @@ use gtk::{gio, glib};
 use vte::prelude::*;
 
 use crate::config;
+use crate::proxy;
 use crate::settings::PreserveDirectory;
 
 /// Used when no usable shell could be discovered; identical to the C
@@ -87,6 +88,8 @@ pub struct SpawnRequest {
     /// Working directory as a URI (initial or inherited from another tab).
     pub cwd_uri: Option<String>,
     pub profile_uuid: String,
+    /// Whether to pass the proxy settings on (the profile's `use-proxy`).
+    pub use_proxy: bool,
 }
 
 /// A fully resolved process to execute.
@@ -319,6 +322,21 @@ pub fn child_environment(profile_uuid: &str, vte_version: u32) -> Vec<String> {
     ]
 }
 
+/// Everything added to a child's environment: the proxy variables when
+/// the profile asks for them, then [`child_environment`].
+fn spawn_environment(request: &SpawnRequest) -> Vec<String> {
+    let mut env = if request.use_proxy {
+        proxy::environment()
+    } else {
+        Vec::new()
+    };
+    env.extend(child_environment(
+        &request.profile_uuid,
+        vte_version_number(),
+    ));
+    env
+}
+
 /// Spawns processes directly on the host using `vte_terminal_spawn_async()`.
 #[derive(Debug, Default)]
 pub struct HostSpawner;
@@ -361,7 +379,7 @@ fn spawn_on_host(
     };
 
     let argv: Vec<&str> = plan.argv.iter().map(String::as_str).collect();
-    let env = child_environment(&request.profile_uuid, vte_version_number());
+    let env = spawn_environment(request);
     let env: Vec<&str> = env.iter().map(String::as_str).collect();
     let cwd = plan
         .cwd

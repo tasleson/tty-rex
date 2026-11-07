@@ -641,6 +641,7 @@ impl Tab {
                 .clone()
                 .or_else(|| self.previous_cwd_uri.clone()),
             profile_uuid: self.profile.uuid().to_owned(),
+            use_proxy: self.profile.use_proxy(),
         };
 
         let spawned = sender.input_sender().clone();

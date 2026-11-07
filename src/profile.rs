@@ -290,6 +290,10 @@ impl Profile {
         PreserveDirectory::from_nick_or_default(&self.settings.string(key::PRESERVE_DIRECTORY))
     }
 
+    pub fn use_proxy(&self) -> bool {
+        self.settings.boolean(key::USE_PROXY)
+    }
+
     pub fn login_shell(&self) -> bool {
         self.settings.boolean(key::LOGIN_SHELL)
     }
