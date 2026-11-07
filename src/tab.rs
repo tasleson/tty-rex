@@ -39,6 +39,7 @@ use relm4::prelude::*;
 use vte::prelude::*;
 
 use crate::color_dialog;
+use crate::container::{Container, Containers};
 use crate::dressing::{Dressing, DressingStyle};
 use crate::inspector::{Inspector, InspectorInit};
 use crate::leader::{self, LeaderKind};
@@ -366,6 +367,9 @@ pub struct TabInit {
     pub profile: Profile,
     pub app_settings: AppSettings,
     pub spawner: Rc<dyn Spawner>,
+    pub containers: Containers,
+    /// The container to run in instead of the profile's default one.
+    pub container: Option<Container>,
     /// Explicit command (`ptyxis -x`); the tab closes when it exits.
     pub command: Option<Vec<String>>,
     /// Directory requested for this tab, e.g. via `--working-directory`.
@@ -385,6 +389,8 @@ pub struct TabInit {
 pub enum TabInput {
     Respawn,
     BannerClicked,
+    /// The container to spawn in was found, or the id that was not.
+    SpawnIn(Result<Container, String>),
     Spawned(Result<glib::Pid, SpawnError>),
     Exited(ChildExit),
     /// Time to check which process leads the terminal.
@@ -422,6 +428,10 @@ pub struct Tab {
     profile: Profile,
     app_settings: AppSettings,
     spawner: Rc<dyn Spawner>,
+    containers: Containers,
+    /// The container the tab was opened in, if not the profile's default
+    /// (`container_at_creation`).
+    container: Option<Container>,
     command: Option<Vec<String>>,
     initial_cwd_uri: Option<String>,
     previous_cwd_uri: Option<String>,
@@ -550,7 +560,15 @@ impl Tab {
         let Some((_, page)) = find_page(root) else {
             return;
         };
-        let runtime = terminal::container_runtime(&self.terminal);
+        // Without a container reported by the shell, the one the tab was
+        // started in decides.
+        let runtime = terminal::container_runtime(&self.terminal).or_else(|| {
+            self.container
+                .clone()
+                .or_else(|| self.containers.lookup(&self.profile.default_container()))
+                .filter(|container| !container.is_session())
+                .map(|container| container.provider().to_owned())
+        });
         let wanted = leader::tab_icon_name(self.leader_kind, runtime.as_deref());
         let current = page
             .icon()
@@ -626,9 +644,27 @@ impl Tab {
         self.banner.set_visible(true);
     }
 
+    /// Starts the process again, in the tab's container or else the
+    /// profile's default one (`ptyxis_tab_respawn()`). Containers are
+    /// still being discovered right after startup, so the lookup waits
+    /// for that.
     fn respawn(&mut self, sender: &ComponentSender<Self>) {
         self.banner.set_visible(false);
         self.state = TabState::Spawning;
+        if let Some(container) = &self.container {
+            sender.input(TabInput::SpawnIn(Ok(container.clone())));
+            return;
+        }
+        let id = self.profile.default_container();
+        let containers = self.containers.clone();
+        let input = sender.input_sender().clone();
+        self.containers.when_loaded(move || {
+            // The tab may have closed meanwhile; then nobody is listening.
+            let _ = input.send(TabInput::SpawnIn(containers.lookup(&id).ok_or(id)));
+        });
+    }
+
+    fn spawn_in(&mut self, container: Container, sender: &ComponentSender<Self>) {
         self.has_pressed_key.set(false);
 
         let request = SpawnRequest {
@@ -642,6 +678,7 @@ impl Tab {
                 .or_else(|| self.previous_cwd_uri.clone()),
             profile_uuid: self.profile.uuid().to_owned(),
             use_proxy: self.profile.use_proxy(),
+            container,
         };
 
         let spawned = sender.input_sender().clone();
@@ -816,6 +853,8 @@ impl Component for Tab {
             profile: init.profile,
             app_settings: init.app_settings,
             spawner: init.spawner,
+            containers: init.containers,
+            container: init.container,
             command: init.command,
             initial_cwd_uri: init.initial_cwd_uri,
             previous_cwd_uri: init.previous_cwd_uri,
@@ -869,6 +908,14 @@ impl Component for Tab {
                 if matches!(self.state, TabState::Exited | TabState::Failed) {
                     self.respawn(&sender);
                 }
+            }
+            TabInput::SpawnIn(Ok(container)) => self.spawn_in(container, &sender),
+            TabInput::SpawnIn(Err(id)) => {
+                self.state = TabState::Failed;
+                self.show_banner(
+                    &format!("Cannot locate container “{id}”"),
+                    BannerAction::EditProfile,
+                );
             }
             TabInput::Spawned(Ok(pid)) => {
                 self.child_pid.set(Some(pid.0));

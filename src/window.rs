@@ -33,8 +33,9 @@ use relm4::actions::{ActionName, EmptyType, RelmAction};
 use relm4::prelude::*;
 use vte::prelude::*;
 
-use crate::app::{App, TabRequest};
+use crate::app::{App, TabRef, TabRequest};
 use crate::config;
+use crate::container::Container;
 use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
 use crate::settings::NewTabPosition;
 use crate::shortcuts::Shortcuts;
@@ -73,6 +74,15 @@ relm4::new_stateful_action!(
     pub NewTabWithProfileAction,
     WindowActions,
     "new-tab-with-profile",
+    String,
+    ()
+);
+// Ptyxis's `win.new-terminal` takes a (profile, container) pair; tty-rex
+// splits it like `new-tab-with-profile`, taking a container id.
+relm4::new_stateful_action!(
+    pub NewTabInContainerAction,
+    WindowActions,
+    "new-tab-in-container",
     String,
     ()
 );
@@ -127,6 +137,8 @@ pub enum WindowInput {
     /// `None` keeps the active tab's profile.
     NewTab {
         profile_uuid: Option<String>,
+        /// Runs the tab in this container rather than the profile's.
+        container_id: Option<String>,
     },
     NewWindow,
     CloseTab,
@@ -373,14 +385,26 @@ fn inherited_request(
         ..Default::default()
     };
     if let Some(active) = tab_view.selected_page().and_then(|p| app.tab(&p.child())) {
-        request.profile_uuid = request.profile_uuid.or(Some(active.profile_uuid));
+        request.profile_uuid = request.profile_uuid.or(Some(active.profile_uuid.clone()));
         request.previous_cwd_uri = terminal::current_directory_uri(&active.terminal);
         request.zoom = active.zoom.get();
         request.grid_size = u32::try_from(active.terminal.column_count())
             .ok()
             .zip(u32::try_from(active.terminal.row_count()).ok());
+        if app.preserves_container(request.profile_uuid.as_deref()) {
+            request.container = current_container(app, &active);
+        }
     }
     request
+}
+
+/// The container `tab` runs in: the one its shell reports if tty-rex
+/// knows it, else the one it was opened in (`ptyxis_tab_dup_container()`).
+fn current_container(app: &App, tab: &TabRef) -> Option<Container> {
+    terminal::container_runtime(&tab.terminal)
+        .zip(terminal::container_name(&tab.terminal))
+        .and_then(|(runtime, name)| app.containers().find_by_name(&runtime, &name))
+        .or_else(|| tab.container.clone())
 }
 
 /// Creates a tab for `request` and selects it in `tab_view`. Free of the
@@ -723,15 +747,26 @@ impl Component for Window {
 
         add_action::<NewTabAction>(&window, &sender, || WindowInput::NewTab {
             profile_uuid: None,
+            container_id: None,
         });
         let input = sender.input_sender().clone();
         let new_tab_with_profile =
             RelmAction::<NewTabWithProfileAction>::new_with_target_value(move |_, uuid| {
                 input.emit(WindowInput::NewTab {
                     profile_uuid: Some(uuid),
+                    container_id: None,
                 })
             });
         window.add_action(new_tab_with_profile.gio_action());
+        let input = sender.input_sender().clone();
+        let new_tab_in_container =
+            RelmAction::<NewTabInContainerAction>::new_with_target_value(move |_, id| {
+                input.emit(WindowInput::NewTab {
+                    profile_uuid: None,
+                    container_id: Some(id),
+                })
+            });
+        window.add_action(new_tab_in_container.gio_action());
         add_action::<NewWindowAction>(&window, &sender, || WindowInput::NewWindow);
         add_action::<CloseTabAction>(&window, &sender, || WindowInput::CloseTab);
         add_action::<CloseOtherTabsAction>(&window, &sender, || WindowInput::CloseOtherTabs);
@@ -865,8 +900,17 @@ impl Component for Window {
         use crate::tab::TabInput;
         match message {
             WindowInput::AddTab(request) => self.add_tab(request),
-            WindowInput::NewTab { profile_uuid } => {
-                let request = self.inherited_request(profile_uuid);
+            WindowInput::NewTab {
+                profile_uuid,
+                container_id,
+            } => {
+                let mut request = self.inherited_request(profile_uuid);
+                // An unknown container leaves the inherited or default one.
+                if let Some(container) =
+                    container_id.and_then(|id| self.app.containers().lookup(&id))
+                {
+                    request.container = Some(container);
+                }
                 self.add_tab(request);
             }
             WindowInput::NewWindow => {

@@ -39,6 +39,7 @@ pub mod choices;
 pub mod cli;
 pub mod color_dialog;
 pub mod config;
+pub mod container;
 pub mod dressing;
 pub mod find_bar;
 pub mod inspector;

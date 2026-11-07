@@ -28,6 +28,12 @@ tty-rex understands `--tab`, `--new-window`, `--tab-with-profile`,
 `-s`/`--standalone`, `--preferences` and `--import-palette FILE` with the
 same meaning as in Ptyxis; `cargo run -- --help` lists them.
 
+Containers work as in Ptyxis, but without the agent: tty-rex lists
+podman's containers itself (`podman ps`), classifying toolbox, distrobox
+and apx ones by their labels, and runs shells in them through
+`podman exec` or `distrobox enter`. They appear in the new tab menu and
+as a profile's default container. Ptyxis's JHBuild entry is not ported.
+
 Beyond Ptyxis, "Show Telemetry" in the terminal's context menu
 (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> by default) toggles a footer
 with the network (TCP only), CPU and memory use of the processes started

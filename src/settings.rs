@@ -300,6 +300,14 @@ nick_enum! {
 }
 
 nick_enum! {
+    /// Whether new tabs open in the container the current tab runs in.
+    PreserveContainer: "PreserveContainer", default Never {
+        Never => "never",
+        Always => "always",
+    }
+}
+
+nick_enum! {
     PreserveDirectory: "PreserveDirectory", default Safe {
         Never => "never",
         Safe => "safe",
@@ -866,6 +874,7 @@ pub(crate) mod tests {
         check_enum!(CursorBlinkMode);
         check_enum!(TextBlinkMode);
         check_enum!(ExitAction);
+        check_enum!(PreserveContainer);
         check_enum!(PreserveDirectory);
         check_enum!(NewTabPosition);
         check_enum!(InterfaceStyle);

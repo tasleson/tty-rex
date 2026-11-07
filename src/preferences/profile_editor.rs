@@ -26,16 +26,14 @@ use relm4::prelude::*;
 use super::custom_links::CustomLinksGroup;
 use super::widgets;
 use crate::choices;
+use crate::container::{Containers, ListenerId};
 use crate::palette;
 use crate::profile::{self, Profile, Profiles, key};
-
-/// The only container available without `ptyxis-agent`: the host
-/// session, which the C editor titles "My Computer".
-const SESSION_CONTAINER: (&str, &str) = ("My Computer", "session");
 
 pub struct ProfileEditorInit {
     pub profile: Profile,
     pub profiles: Profiles,
+    pub containers: Containers,
 }
 
 #[derive(Debug)]
@@ -44,12 +42,17 @@ pub enum ProfileEditorInput {
     Delete,
     /// User palettes changed; refresh the palette choices.
     RefreshPalettes,
+    /// Containers came or went; refresh the default container choices.
+    RefreshContainers,
 }
 
 pub struct ProfileEditor {
     profile: Profile,
     palette_row: adw::ComboRow,
+    containers_row: adw::ComboRow,
     profiles: Profiles,
+    containers: Containers,
+    containers_listener: ListenerId,
     _custom_links: CustomLinksGroup,
 }
 
@@ -151,13 +154,7 @@ impl Component for ProfileEditor {
             .title("Default Container")
             .subtitle("The default container to use with this profile")
             .build();
-        widgets::bind_values(
-            &settings,
-            key::DEFAULT_CONTAINER,
-            &containers,
-            &[SESSION_CONTAINER.0],
-            vec![SESSION_CONTAINER.1.to_owned()],
-        );
+        bind_containers(&settings, &containers, &init.containers);
         let preserve_container = widgets::combo_row(
             "Preserve Container",
             Some("Preserve the current container when opening new tabs and windows"),
@@ -205,13 +202,25 @@ impl Component for ProfileEditor {
             ProfileEditorInput::Delete
         });
 
+        let input = sender.input_sender().clone();
+        let containers_listener = init
+            .containers
+            .connect_changed(move || input.emit(ProfileEditorInput::RefreshContainers));
+
         let model = ProfileEditor {
             profile: init.profile,
             palette_row,
+            containers_row: containers,
             profiles: init.profiles,
+            containers: init.containers,
+            containers_listener,
             _custom_links: custom_links,
         };
         ComponentParts { model, widgets: () }
+    }
+
+    fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
+        self.containers.disconnect(self.containers_listener);
     }
 
     fn update(&mut self, message: Self::Input, _sender: ComponentSender<Self>, root: &Self::Root) {
@@ -219,6 +228,14 @@ impl Component for ProfileEditor {
             ProfileEditorInput::RefreshPalettes => {
                 gio::Settings::unbind(&self.palette_row, "selected");
                 bind_palettes(self.profile.gsettings(), &self.palette_row);
+            }
+            ProfileEditorInput::RefreshContainers => {
+                gio::Settings::unbind(&self.containers_row, "selected");
+                bind_containers(
+                    self.profile.gsettings(),
+                    &self.containers_row,
+                    &self.containers,
+                );
             }
             ProfileEditorInput::CopyUuid => {
                 root.clipboard().set_text(self.profile.uuid());
@@ -237,6 +254,29 @@ impl Component for ProfileEditor {
             }
         }
     }
+}
+
+/// Offers the known containers as the profile's default container. A
+/// default that is not around (yet) is listed by its id so the row still
+/// shows it instead of silently showing another one.
+fn bind_containers(settings: &gio::Settings, row: &adw::ComboRow, containers: &Containers) {
+    let mut entries: Vec<(String, String)> = containers
+        .list()
+        .iter()
+        .map(|c| (c.title().to_owned(), c.id().to_owned()))
+        .collect();
+    let current = settings.string(key::DEFAULT_CONTAINER);
+    if !current.is_empty() && !entries.iter().any(|(_, id)| *id == current) {
+        entries.push((current.to_string(), current.into()));
+    }
+    let titles: Vec<&str> = entries.iter().map(|(title, _)| title.as_str()).collect();
+    widgets::bind_values(
+        settings,
+        key::DEFAULT_CONTAINER,
+        row,
+        &titles,
+        entries.iter().map(|(_, id)| id.clone()).collect(),
+    );
 }
 
 /// Offers every palette in the profile's palette combo row.

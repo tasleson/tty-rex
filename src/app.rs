@@ -37,6 +37,7 @@ use relm4::prelude::*;
 
 use crate::cli::{self, CommandLineAction, CommandLineOptions, WindowTarget};
 use crate::config;
+use crate::container::{self, Container, Containers};
 use crate::preferences::{Preferences, PreferencesInit, PreferencesInput};
 use crate::profile::{Profile, Profiles};
 use crate::settings::{self, AppSettings, SettingsError};
@@ -44,7 +45,13 @@ use crate::spawn::{HostSpawner, Spawner};
 use crate::tab::{Tab, TabInit, TabInput};
 use crate::telemetry::Pid;
 use crate::terminal::ZoomLevel;
-use crate::window::{NewTabWithProfileAction, Window, WindowInit, WindowInput};
+use crate::window::{
+    NewTabInContainerAction, NewTabWithProfileAction, Window, WindowInit, WindowInput,
+};
+
+/// Section titles of the "new tab" menu once it lists containers.
+const PROFILES_SECTION_TITLE: &str = "Profiles";
+const CONTAINERS_SECTION_TITLE: &str = "Containers";
 
 /// Icons from `ptyxis/icons/`, compiled by `build.rs`.
 static RESOURCES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ptyxis.gresource"));
@@ -70,6 +77,8 @@ pub struct TabRequest {
     pub title_prefix: Option<String>,
     pub zoom: ZoomLevel,
     pub grid_size: Option<(u32, u32)>,
+    /// Container to run in instead of the profile's default one.
+    pub container: Option<Container>,
 }
 
 struct TabHandle {
@@ -80,6 +89,7 @@ struct TabHandle {
     color: Rc<Cell<Option<gdk::RGBA>>>,
     child_pid: Rc<Cell<Option<Pid>>>,
     css_class: String,
+    container: Option<Container>,
 }
 
 /// Cheap clones of a tab's shared state for use by windows.
@@ -94,6 +104,8 @@ pub struct TabRef {
     pub css_class: String,
     /// The tab's running child process, if any.
     pub child_pid: Rc<Cell<Option<Pid>>>,
+    /// The container the tab was opened in, if not its profile's default.
+    pub container: Option<Container>,
 }
 
 /// Handle to a launched window.
@@ -120,6 +132,7 @@ pub struct App {
     settings: AppSettings,
     profiles: Profiles,
     spawner: Rc<dyn Spawner>,
+    containers: Containers,
     /// Shared by every window's "new tab" split button.
     profile_menu: gio::Menu,
     /// Kept alive so their label-change handlers keep firing.
@@ -173,6 +186,7 @@ impl App {
             profiles: Profiles::new(settings.clone()),
             settings,
             spawner: Rc::new(HostSpawner),
+            containers: Containers::new(),
             profile_menu: gio::Menu::new(),
             menu_profiles: RefCell::default(),
             windows: RefCell::default(),
@@ -196,6 +210,10 @@ impl App {
         gsettings.connect_changed(Some(settings::key::PROFILE_UUIDS), {
             let weak = Rc::downgrade(&app);
             move |_, _| rebuild_profile_menu(&weak)
+        });
+        app.containers.connect_changed({
+            let weak = Rc::downgrade(&app);
+            move || rebuild_profile_menu(&weak)
         });
         rebuild_profile_menu(&Rc::downgrade(&app));
 
@@ -276,6 +294,18 @@ impl App {
         &self.profile_menu
     }
 
+    pub fn containers(&self) -> &Containers {
+        &self.containers
+    }
+
+    /// Whether `uuid` (or the default profile) keeps the container of the
+    /// tab a new one is opened from.
+    pub fn preserves_container(&self, uuid: Option<&str>) -> bool {
+        self.profiles
+            .profile(uuid)
+            .is_ok_and(|p| p.preserve_container() != settings::PreserveContainer::Never)
+    }
+
     /// Launches a tab component and returns its root widget for a page.
     pub fn create_tab(&self, request: TabRequest) -> Result<gtk::Widget, SettingsError> {
         let profile = self.profiles.profile(request.profile_uuid.as_deref())?;
@@ -288,6 +318,8 @@ impl App {
                 profile,
                 app_settings: self.settings.clone(),
                 spawner: Rc::clone(&self.spawner),
+                containers: self.containers.clone(),
+                container: request.container.clone(),
                 command: request.command,
                 initial_cwd_uri: request.initial_cwd_uri,
                 previous_cwd_uri: request.previous_cwd_uri,
@@ -311,6 +343,7 @@ impl App {
                 color,
                 child_pid,
                 css_class,
+                container: request.container,
             },
         );
         Ok(child)
@@ -325,6 +358,7 @@ impl App {
             color: Rc::clone(&handle.color),
             css_class: handle.css_class.clone(),
             child_pid: Rc::clone(&handle.child_pid),
+            container: handle.container.clone(),
         })
     }
 
@@ -364,6 +398,7 @@ impl App {
                 .launch(PreferencesInit {
                     settings: self.settings.clone(),
                     profiles: self.profiles.clone(),
+                    containers: self.containers.clone(),
                 })
                 .detach();
             // Like the C window it gets its own window group so it stacks
@@ -519,8 +554,45 @@ fn rebuild_profile_menu(app: &Weak<App>) {
             });
     }
     app.profile_menu.remove_all();
-    app.profile_menu.append_section(None, &section);
+    let containers = menu_containers(app.containers.list());
+    if containers.is_empty() {
+        app.profile_menu.append_section(None, &section);
+    } else {
+        // Like the C new terminal menu: the host, profiles, containers.
+        let host = gio::Menu::new();
+        host.append_item(
+            &RelmAction::<NewTabInContainerAction>::to_menu_item_with_target_value(
+                container::SESSION_TITLE,
+                &container::SESSION_ID.to_owned(),
+            ),
+        );
+        app.profile_menu.append_section(None, &host);
+        app.profile_menu
+            .append_section(Some(PROFILES_SECTION_TITLE), &section);
+        let section = gio::Menu::new();
+        for container in containers {
+            section.append_item(
+                &RelmAction::<NewTabInContainerAction>::to_menu_item_with_target_value(
+                    container.display_name(),
+                    &container.id().to_owned(),
+                ),
+            );
+        }
+        app.profile_menu
+            .append_section(Some(CONTAINERS_SECTION_TITLE), &section);
+    }
     *app.menu_profiles.borrow_mut() = profiles;
+}
+
+/// The named containers other than the host, by name, as the C window's
+/// `maybe_containers` model lists them.
+fn menu_containers(containers: Vec<Container>) -> Vec<Container> {
+    let mut containers: Vec<Container> = containers
+        .into_iter()
+        .filter(|c| !c.is_session() && !c.display_name().is_empty())
+        .collect();
+    containers.sort_by(|a, b| a.display_name().cmp(b.display_name()));
+    containers
 }
 
 /// Runs the application with the process arguments and returns its exit code.
@@ -627,5 +699,22 @@ mod tests {
                 "{installed:?}"
             );
         }
+    }
+
+    #[test]
+    fn menu_lists_named_containers_by_name() {
+        let discovered = container::parse_podman_ps(
+            r#"[{"Id": "z", "Names": ["zeta"]}, {"Id": "n"},
+                {"Id": "a", "Names": ["alpha"]}]"#,
+        )
+        .unwrap();
+        let all = std::iter::once(Container::session())
+            .chain(discovered)
+            .collect();
+        let ids: Vec<String> = menu_containers(all)
+            .iter()
+            .map(|c| c.id().to_owned())
+            .collect();
+        assert_eq!(ids, ["a", "z"]);
     }
 }

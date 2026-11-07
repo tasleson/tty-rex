@@ -200,6 +200,15 @@ pub fn container_runtime(terminal: &vte::Terminal) -> Option<String> {
         .filter(|runtime| !runtime.is_empty())
 }
 
+/// Name of the container the shell reported running in, if any.
+pub fn container_name(terminal: &vte::Terminal) -> Option<String> {
+    terminal
+        .termprop_string(TERMPROP_CONTAINER_NAME)
+        .0
+        .map(|name| name.to_string())
+        .filter(|name| !name.is_empty())
+}
+
 /// Calls `f` whenever the reported container name or runtime changes.
 pub fn connect_container_changed(
     terminal: &vte::Terminal,

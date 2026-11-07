@@ -25,8 +25,8 @@ use gtk::{gio, glib};
 
 use crate::config;
 use crate::settings::{
-    self, AppSettings, CjkAmbiguousWidth, EraseBinding, ExitAction, PreserveDirectory,
-    SettingsError,
+    self, AppSettings, CjkAmbiguousWidth, EraseBinding, ExitAction, PreserveContainer,
+    PreserveDirectory, SettingsError,
 };
 
 /// Keys of the `org.gnome.Ptyxis.Profile` schema used by the port.
@@ -284,6 +284,21 @@ impl Profile {
 
     pub fn exit_action(&self) -> ExitAction {
         ExitAction::from_nick_or_default(&self.settings.string(key::EXIT_ACTION))
+    }
+
+    /// Id of the container new tabs run in. An empty id, which the C
+    /// build would fail to find, means the host session.
+    pub fn default_container(&self) -> String {
+        let id = self.settings.string(key::DEFAULT_CONTAINER);
+        if id.is_empty() {
+            crate::container::SESSION_ID.to_owned()
+        } else {
+            id.into()
+        }
+    }
+
+    pub fn preserve_container(&self) -> PreserveContainer {
+        PreserveContainer::from_nick_or_default(&self.settings.string(key::PRESERVE_CONTAINER))
     }
 
     pub fn preserve_directory(&self) -> PreserveDirectory {

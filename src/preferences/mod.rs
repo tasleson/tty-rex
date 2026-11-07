@@ -39,6 +39,7 @@ use self::accel_dialog::{AccelDialog, AccelDialogInit};
 use self::custom_links::CustomLinksGroup;
 use self::profile_editor::{ProfileEditor, ProfileEditorInit, ProfileEditorInput};
 use crate::choices;
+use crate::container::Containers;
 use crate::palette::{self, Face, Palette, Scarf};
 use crate::palette_preview::PalettePreview;
 use crate::profile::{self, Profile, Profiles};
@@ -96,6 +97,7 @@ pub fn palette_visible(palette: &Palette, current_id: &str, show_all: bool, dark
 pub struct PreferencesInit {
     pub settings: AppSettings,
     pub profiles: Profiles,
+    pub containers: Containers,
 }
 
 #[derive(Debug)]
@@ -124,6 +126,7 @@ pub enum PreferencesInput {
 pub struct Preferences {
     settings: AppSettings,
     profiles: Profiles,
+    containers: Containers,
     default_profile: Option<Profile>,
     default_binder: widgets::Binder,
     custom_links: Option<CustomLinksGroup>,
@@ -256,6 +259,7 @@ impl Preferences {
             .launch(ProfileEditorInit {
                 profile,
                 profiles: self.profiles.clone(),
+                containers: self.containers.clone(),
             })
             .detach();
         root.pop_subpage();
@@ -714,6 +718,7 @@ impl Component for Preferences {
         let mut model = Preferences {
             settings: init.settings,
             profiles: init.profiles,
+            containers: init.containers,
             default_profile: None,
             default_binder: binder,
             custom_links,

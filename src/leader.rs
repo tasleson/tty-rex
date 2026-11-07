@@ -70,9 +70,9 @@ pub fn container_icon_name(runtime: &str) -> Option<&'static str> {
 /// Icon shown on the tab, as in `ptyxis_tab_dup_icon()`: superuser and
 /// remote leaders win, otherwise the container the shell runs in, if any.
 ///
-/// The C build looks the container up among those the agent discovered
-/// and falls back to the tab's or profile's container; the port spawns
-/// only on the host, so the reported runtime is all it has.
+/// `container_runtime` is the runtime the shell reported, or else the
+/// provider of the container the tab was started in (see
+/// `Tab::update_icon`).
 pub fn tab_icon_name(kind: LeaderKind, container_runtime: Option<&str>) -> Option<&'static str> {
     match kind {
         LeaderKind::Superuser => Some("process-superuser-symbolic"),

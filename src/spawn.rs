@@ -22,17 +22,16 @@
 //! The C implementation spawns everything through `ptyxis-agent` over
 //! D-Bus (`agent/org.gnome.Ptyxis.Agent.xml`), which also handles
 //! containers. The port currently ships only [`HostSpawner`], which runs
-//! the user's shell on the host through VTE, but tabs only talk to the
-//! [`Spawner`] trait so an agent-backed implementation can replace it
-//! without touching the UI.
+//! the user's shell through VTE on the host, or in a container by
+//! wrapping it in a host command (see [`crate::container`]), but tabs
+//! only talk to the [`Spawner`] trait so an agent-backed implementation
+//! can replace it without touching the UI.
 //!
 //! Command-line construction mirrors `ptyxis_client_spawn_async()` in
 //! `src/ptyxis-client.c` and is kept pure so it can be unit tested.
 //!
 //! An agent-backed spawner will need more than the trait carries today:
-//! the target container id (the agent's `CreateProcess` runs inside a
-//! container) and a way to cancel an in-flight spawn when the tab closes
-//! first.
+//! a way to cancel an in-flight spawn when the tab closes first.
 
 use std::cell::{OnceCell, RefCell};
 use std::os::unix::fs::PermissionsExt;
@@ -45,6 +44,7 @@ use gtk::{gio, glib};
 use vte::prelude::*;
 
 use crate::config;
+use crate::container::{self, Container, ExecContext};
 use crate::proxy;
 use crate::settings::PreserveDirectory;
 
@@ -63,6 +63,8 @@ const BUILTIN_SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "fish", "tcsh", "
 const DASH_L_SHELLS: &[&str] = &["bash", "fish", "zsh", "dash", "tcsh", "sh"];
 
 const ETC_SHELLS: &str = "/etc/shells";
+/// Looked for in a container when the user's shell is unknown.
+const DEFAULT_SHELL_NAME: &str = "bash";
 const LOGIN_FLAG: &str = "-l";
 
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +74,8 @@ pub enum SpawnError {
         command: String,
         source: glib::Error,
     },
+    #[error("Failed to prepare container “{name}”: {message}")]
+    Container { name: String, message: String },
     #[error("{0}")]
     Spawn(#[from] glib::Error),
 }
@@ -90,6 +94,8 @@ pub struct SpawnRequest {
     pub profile_uuid: String,
     /// Whether to pass the proxy settings on (the profile's `use-proxy`).
     pub use_proxy: bool,
+    /// Where to run; the host session by default.
+    pub container: Container,
 }
 
 /// A fully resolved process to execute.
@@ -353,22 +359,68 @@ impl Spawner for HostSpawner {
         let request = request.clone();
         glib::spawn_future_local(async move {
             let info = host_shell_info().await;
+            let prepared = if request.container.is_session() {
+                Ok(None)
+            } else {
+                prepare_container(&request.container, &info).await.map(Some)
+            };
             // The tab may have closed while the shell was being discovered.
-            if let Some(terminal) = weak_terminal.upgrade() {
-                spawn_on_host(&terminal, &request, &info, on_spawned, on_exit);
+            let Some(terminal) = weak_terminal.upgrade() else {
+                return;
+            };
+            match prepared {
+                Ok(prepared) => spawn_on_host(
+                    &terminal,
+                    &request,
+                    &info,
+                    prepared.as_ref(),
+                    on_spawned,
+                    on_exit,
+                ),
+                Err(e) => on_spawned(Err(e)),
             }
         });
     }
 }
 
+/// Starts the container and finds the user's shell in it, on a worker
+/// thread since that runs podman.
+async fn prepare_container(
+    container: &Container,
+    info: &HostShellInfo,
+) -> Result<container::Prepared, SpawnError> {
+    let shell_name = basename(info.user_shell.as_deref().unwrap_or(DEFAULT_SHELL_NAME)).to_owned();
+    let target = container.clone();
+    gio::spawn_blocking(move || container::prepare(&target, &shell_name))
+        .await
+        .unwrap_or_else(|_| Err("the setup thread panicked".to_owned()))
+        .map_err(|message| SpawnError::Container {
+            name: container.display_name().to_owned(),
+            message,
+        })
+}
+
+fn home_dir() -> Option<String> {
+    glib::home_dir().to_str().map(str::to_owned)
+}
+
+/// `prepared` is set when spawning into a container other than the
+/// session.
 fn spawn_on_host(
     terminal: &vte::Terminal,
     request: &SpawnRequest,
     info: &HostShellInfo,
+    prepared: Option<&container::Prepared>,
     on_spawned: SpawnCallback,
     on_exit: ExitCallback,
 ) {
-    let plan = match build_plan(request, info.user_shell.as_deref(), |arg0| {
+    // Like the C client, the shell is the user's one as found in the
+    // container, but whether a program is a shell is decided on the host.
+    let default_shell = match prepared {
+        Some(prepared) => prepared.shell.as_deref(),
+        None => info.user_shell.as_deref(),
+    };
+    let plan = match build_plan(request, default_shell, |arg0| {
         is_shell_in(arg0, &info.configured_shells)
     }) {
         Ok(plan) => plan,
@@ -378,13 +430,33 @@ fn spawn_on_host(
         }
     };
 
-    let argv: Vec<&str> = plan.argv.iter().map(String::as_str).collect();
-    let env = spawn_environment(request);
+    let mut env = spawn_environment(request);
+    let (argv, cwd) = match prepared {
+        None => (plan.argv, plan.cwd),
+        Some(prepared) => {
+            // Variables go to the container through the wrapper, so the
+            // host command needs none of its own.
+            let cwd = plan.cwd.or_else(home_dir).unwrap_or_default();
+            env.push(format!("PWD={cwd}"));
+            let user = glib::user_name();
+            let exec = container::exec_plan(
+                &request.container,
+                &plan.argv,
+                &env,
+                &ExecContext {
+                    user: &user.to_string_lossy(),
+                    cwd: &cwd,
+                    cwd_on_host: Path::new(&cwd).is_dir(),
+                    detach_keys: prepared.detach_keys,
+                },
+            );
+            env.clear();
+            (exec.argv, exec.host_cwd)
+        }
+    };
+    let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     let env: Vec<&str> = env.iter().map(String::as_str).collect();
-    let cwd = plan
-        .cwd
-        .filter(|dir| Path::new(dir).is_dir())
-        .or_else(|| glib::home_dir().to_str().map(str::to_owned));
+    let cwd = cwd.filter(|dir| Path::new(dir).is_dir()).or_else(home_dir);
 
     let weak_terminal = terminal.downgrade();
     terminal.spawn_async(
