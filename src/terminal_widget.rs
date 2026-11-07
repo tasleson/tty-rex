@@ -43,6 +43,21 @@ mod imp {
         const NAME: &'static str = "TtyRexTerminal";
         type Type = super::TerminalWidget;
         type ParentType = vte::Terminal;
+
+        fn class_init(klass: &mut Self::Class) {
+            // vte4-rs installs a `commit` trampoline that wraps VTE's text
+            // in an owning `GString`, so dropping it frees VTE's buffer: the
+            // first commit (any keystroke, since tabs connect to `commit`)
+            // aborts with a double free. Nothing here overrides `commit`,
+            // so put VTE's own slot back.
+            // SAFETY: `type_data()` holds the parent class pointer, set by
+            // glib before this runs, and that class is a `VteTerminalClass`.
+            let parent = unsafe {
+                &*(Self::type_data().as_ref().parent_class() as *const vte::ffi::VteTerminalClass)
+            };
+            let klass: &mut glib::Class<vte::Terminal> = klass.upcast_ref_mut();
+            klass.as_mut().commit = parent.commit;
+        }
     }
 
     impl ObjectImpl for TerminalWidget {}
