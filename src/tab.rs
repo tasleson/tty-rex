@@ -46,7 +46,7 @@ use crate::leader::{self, LeaderKind};
 use crate::palette;
 use crate::profile::Profile;
 use crate::settings::{self, AppSettings, ExitAction};
-use crate::spawn::{ChildExit, SpawnError, SpawnRequest, Spawner};
+use crate::spawn::{self, ChildExit, SpawnError, SpawnRequest, Spawner};
 use crate::telemetry::Pid;
 use crate::terminal::{self, ZoomLevel};
 use crate::title_dialog::{SET_TITLE_LABEL, TitleDialog};
@@ -78,6 +78,9 @@ const COLOR_DOT_OUTLINE_WIDTH: f64 = 1.0;
 const POLL_DELAY_INTERACTIVE: Duration = Duration::from_millis(100);
 const POLL_DELAY_MIN: Duration = Duration::from_millis(500);
 const POLL_DELAY_MAX: Duration = Duration::from_secs(10);
+
+/// Why the session should hold off logging out, as Ptyxis tells it.
+const INHIBIT_LOGOUT_REASON: &str = "A foreground process is running";
 
 /// What the banner button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +299,65 @@ impl LeaderMonitor {
 
 /// The terminal context menu: the items of `src/ptyxis-terminal.ui` whose
 /// actions the port implements, plus tty-rex's telemetry toggle.
+/// What the last check found in the foreground, as far as logout
+/// inhibition cares (`has_foreground_process` and `program_name`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ForegroundState {
+    /// A process other than the tab's own child leads the terminal.
+    pub has_foreground: bool,
+    /// That process's program, when its command line names one.
+    pub program_name: Option<String>,
+}
+
+impl ForegroundState {
+    pub fn new(foreground: Option<&leader::Foreground>) -> Self {
+        Self {
+            has_foreground: foreground.is_some(),
+            program_name: foreground.and_then(|f| f.program_name().map(str::to_owned)),
+        }
+    }
+
+    /// Whether to keep the session from logging out: only for a foreground
+    /// program that is not a shell (`ptyxis_tab_update_inhibit()`).
+    pub fn inhibits_logout(&self, is_shell: impl Fn(&str) -> bool) -> bool {
+        self.has_foreground
+            && self
+                .program_name
+                .as_deref()
+                .is_some_and(|name| !is_shell(name))
+    }
+}
+
+/// A logout inhibition held for a tab, lifted when dropped
+/// (`inhibit_cookie` and `gtk_application_uninhibit()`).
+struct LogoutInhibit {
+    application: gtk::Application,
+    cookie: u32,
+}
+
+impl LogoutInhibit {
+    /// Asks the session to hold off logging out on behalf of `window`.
+    /// GTK returns no cookie when the request failed.
+    fn new(window: &gtk::Window) -> Option<Self> {
+        let application = gio::Application::default().and_downcast::<gtk::Application>()?;
+        let cookie = application.inhibit(
+            Some(window),
+            gtk::ApplicationInhibitFlags::LOGOUT,
+            Some(INHIBIT_LOGOUT_REASON),
+        );
+        (cookie != 0).then_some(Self {
+            application,
+            cookie,
+        })
+    }
+}
+
+impl Drop for LogoutInhibit {
+    fn drop(&mut self) {
+        self.application.uninhibit(self.cookie);
+    }
+}
+
 fn context_menu() -> gio::Menu {
     let menu = gio::Menu::new();
     let section = gio::Menu::new();
@@ -405,6 +467,8 @@ pub enum TabInput {
     Exited(ChildExit),
     /// Time to check which process leads the terminal.
     PollLeader,
+    /// The `inhibit-logout` setting changed.
+    InhibitLogoutChanged,
     UpdateTitle,
     AppSettingsChanged,
     /// A highlight color in tty-rex's own settings changed.
@@ -488,6 +552,10 @@ pub struct Tab {
     /// Foreground process group seen by the last check.
     leader_pgrp: Option<i32>,
     leader_monitor: Rc<LeaderMonitor>,
+    /// The foreground program seen by the last check.
+    foreground: ForegroundState,
+    /// Held while that program keeps the session from logging out.
+    logout_inhibit: Option<LogoutInhibit>,
     dressing: Dressing,
 }
 
@@ -630,10 +698,44 @@ impl Tab {
         // as a change even when its kind is the same, so checks stay quick.
         let new_process = std::mem::replace(&mut self.leader_pgrp, pgrp) != pgrp;
         let changed = self.set_leader_kind(kind, root) | new_process;
-        // Without a process there is nothing to watch until output resumes.
         if running {
+            let foreground =
+                pgrp.and_then(|pgrp| leader::foreground_of(pgrp, self.child_pid.get()));
+            let foreground = ForegroundState::new(foreground.as_ref());
+            // Like ptyxis_tab_poll_agent_cb(), only a different program
+            // revisits the inhibition.
+            if foreground != self.foreground {
+                self.foreground = foreground;
+                self.update_logout_inhibit(root);
+            }
             self.leader_monitor.polled(changed);
+        } else {
+            // Like ptyxis_tab_poll_agent_async() without a process; the
+            // inhibition is left to the exit handling.
+            self.foreground.has_foreground = false;
         }
+    }
+
+    /// Holds off logging out while a program other than a shell runs in
+    /// the foreground, if the `inhibit-logout` setting allows it
+    /// (`ptyxis_tab_update_inhibit()`).
+    fn update_logout_inhibit(&mut self, root: &gtk::Box) {
+        if !self.app_settings.inhibit_logout() {
+            self.logout_inhibit = None;
+            return;
+        }
+        let inhibit = self.foreground.inhibits_logout(spawn::is_shell);
+        if inhibit == self.logout_inhibit.is_some() {
+            return;
+        }
+        self.logout_inhibit = if inhibit {
+            // GTK needs the window the request is made for.
+            root.root()
+                .and_downcast::<gtk::Window>()
+                .and_then(|window| LogoutInhibit::new(&window))
+        } else {
+            None
+        };
     }
 
     fn title(&self) -> String {
@@ -729,6 +831,8 @@ impl Tab {
 
     fn handle_exit(&mut self, exit: ChildExit, root: &gtk::Box, sender: &ComponentSender<Self>) {
         self.child_pid.set(None);
+        // Like ptyxis_tab_wait_cb(), before anything else.
+        self.update_logout_inhibit(root);
         self.state = if exit.is_success() {
             TabState::Exited
         } else {
@@ -860,6 +964,14 @@ impl Component for Tab {
             .connect_changed(None, move |_, _| input.emit(TabInput::AppSettingsChanged));
         shared_handlers.push((init.app_settings.gsettings().clone().upcast(), id));
         let input = sender.input_sender().clone();
+        let id = init
+            .app_settings
+            .gsettings()
+            .connect_changed(Some(settings::key::INHIBIT_LOGOUT), move |_, _| {
+                input.emit(TabInput::InhibitLogoutChanged)
+            });
+        shared_handlers.push((init.app_settings.gsettings().clone().upcast(), id));
+        let input = sender.input_sender().clone();
         let tty_rex_settings = init.app_settings.tty_rex_gsettings();
         let id = tty_rex_settings.connect_changed(None, move |_, key| {
             if settings::tty_rex_key::COLOR_KEYS.contains(&key) {
@@ -927,6 +1039,8 @@ impl Component for Tab {
             leader_kind: LeaderKind::Unknown,
             leader_pgrp: None,
             leader_monitor,
+            foreground: ForegroundState::default(),
+            logout_inhibit: None,
             dressing: Dressing::new(),
             shared_handlers,
         };
@@ -974,6 +1088,7 @@ impl Component for Tab {
             }
             TabInput::Exited(exit) => self.handle_exit(exit, root, &sender),
             TabInput::PollLeader => self.poll_leader(root),
+            TabInput::InhibitLogoutChanged => self.update_logout_inhibit(root),
             TabInput::UpdateTitle => {}
             TabInput::AppSettingsChanged => {
                 terminal::apply_app_settings(&self.terminal, &self.app_settings);
@@ -1097,6 +1212,10 @@ impl Component for Tab {
                     dialog.force_close();
                 }
                 self.cancel_color_dialog();
+                // Like ptyxis_tab_unroot(), the inhibition was made for the
+                // old window. It is not taken again until the foreground
+                // program changes.
+                self.logout_inhibit = None;
             }
             TabInput::Focus => {
                 self.terminal.grab_focus();
@@ -1111,6 +1230,8 @@ impl Component for Tab {
 
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
         self.leader_monitor.stop();
+        // As in ptyxis_tab_dispose().
+        self.logout_inhibit = None;
         // The inspector describes this terminal, so it goes with the tab.
         if let Some(inspector) = self.inspector.take() {
             inspector.widget().destroy();
@@ -1128,6 +1249,37 @@ impl Component for Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logout_inhibition() {
+        let is_shell = |name: &str| matches!(name, "bash" | "/bin/zsh");
+        let cases = [
+            // The tab's own child leads the terminal.
+            (None, false, None, false),
+            (Some("vim file.txt "), true, Some("vim"), true),
+            (Some("bash "), true, Some("bash"), false),
+            (Some("/bin/zsh -l "), true, Some("/bin/zsh"), false),
+            // Unreadable or cut short: no program to judge.
+            (Some("truncated"), true, None, false),
+        ];
+        for (cmdline, has_foreground, program_name, inhibits) in cases {
+            let foreground = cmdline.map(|cmdline| leader::Foreground {
+                pid: 42,
+                cmdline: Some(cmdline.to_owned()),
+            });
+            let state = ForegroundState::new(foreground.as_ref());
+            assert_eq!(state.has_foreground, has_foreground, "{cmdline:?}");
+            assert_eq!(state.program_name.as_deref(), program_name, "{cmdline:?}");
+            assert_eq!(state.inhibits_logout(is_shell), inhibits, "{cmdline:?}");
+        }
+        // A name left over from an earlier check does not count once the
+        // foreground is gone (a poll after the process ended).
+        let stale = ForegroundState {
+            has_foreground: false,
+            program_name: Some("vim".to_owned()),
+        };
+        assert!(!stale.inhibits_logout(is_shell));
+    }
 
     #[test]
     fn exit_outcomes() {

@@ -49,7 +49,9 @@ reopens the oldest.
 
 Closing a tab or window while a program other than a shell runs in it
 asks first, as Ptyxis does with its `prompt-on-close` setting on (the
-default; Ptyxis has no preference for it either).
+default; Ptyxis has no preference for it either). While such a program
+runs, the tab also asks the desktop to hold off logging out, following
+Ptyxis's `inhibit-logout` setting.
 
 Beyond Ptyxis, "Show Telemetry" in the terminal's context menu
 (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> by default) toggles a footer
