@@ -1015,16 +1015,23 @@ fn track_set_profile(
 }
 
 /// Keeps `win.pin-tab` / `win.unpin-tab` in line with the selected page
-/// (`ptyxis_window_selected_page_notify_pinned_cb()`), or both disabled
-/// unless `enabled`.
+/// (`ptyxis_window_selected_page_notify_pinned_cb()`).
+///
+/// With `disable_first_page`, both stay disabled when the first page is
+/// selected, as `ptyxis_window_new_for_command()` disables them after adding
+/// its tab. As in Ptyxis, selecting another page or (un)pinning re-enables
+/// them, though a command window offers no way to do either.
 fn track_pinned(
     tab_view: &adw::TabView,
     pin: gio::SimpleAction,
     unpin: gio::SimpleAction,
-    enabled: bool,
+    disable_first_page: bool,
 ) -> glib::SignalGroup {
+    let disable_next_page = Rc::new(Cell::new(disable_first_page));
     let update = move |page: Option<&adw::TabPage>| {
-        let pinned = page.filter(|_| enabled).map(adw::TabPage::is_pinned);
+        let pinned = page
+            .filter(|_| !disable_next_page.replace(false))
+            .map(adw::TabPage::is_pinned);
         pin.set_enabled(pinned == Some(false));
         unpin.set_enabled(pinned == Some(true));
     };
@@ -1352,7 +1359,7 @@ impl Component for Window {
         let pin = add_action::<PinTabAction>(&window, &sender, || WindowInput::SetTabPinned(true));
         let unpin =
             add_action::<UnpinTabAction>(&window, &sender, || WindowInput::SetTabPinned(false));
-        let pinned_signals = track_pinned(&tab_view, pin, unpin, kind.has_tab_actions());
+        let pinned_signals = track_pinned(&tab_view, pin, unpin, !kind.has_tab_actions());
         let next = add_action::<NextTabAction>(&window, &sender, || WindowInput::NextTab);
         let previous =
             add_action::<PreviousTabAction>(&window, &sender, || WindowInput::PreviousTab);
@@ -1396,7 +1403,8 @@ impl Component for Window {
             add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
         // A command window is about its one command, so it offers no way to
         // add, reorder or switch tabs (`ptyxis_window_new_for_command()`);
-        // `win.pin-tab` and `win.unpin-tab` stay disabled in track_pinned().
+        // track_pinned() disables `win.pin-tab` and `win.unpin-tab` once the
+        // command's tab is in.
         if !kind.has_tab_actions() {
             for action in [
                 &new_tab,
