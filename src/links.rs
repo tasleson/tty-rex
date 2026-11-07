@@ -384,6 +384,34 @@ impl Links {
     }
 }
 
+/// The widget coordinates of the `VteEventContext` that
+/// `setup-context-menu` carries, or `None` when the menu is going away
+/// (a `NULL` context). The bindings do not wrap the type, so it is read
+/// through the C API.
+pub fn event_context_coordinates(value: &glib::Value) -> Option<(f64, f64)> {
+    use glib::translate::ToGlibPtr;
+
+    // SAFETY: the type check guards the pointer read, and the context, owned
+    // by VTE, stays valid for the whole signal emission this runs in.
+    unsafe {
+        let context_type = vte::ffi::vte_event_context_get_type();
+        if glib::gobject_ffi::g_type_check_value_holds(value.to_glib_none().0, context_type)
+            == glib::ffi::GFALSE
+        {
+            return None;
+        }
+        // VTE registers the context as a pointer type, not a boxed one.
+        let context = glib::gobject_ffi::g_value_get_pointer(value.to_glib_none().0)
+            as *const vte::ffi::VteEventContext;
+        if context.is_null() {
+            return None;
+        }
+        let (mut x, mut y) = (0.0, 0.0);
+        (vte::ffi::vte_event_context_get_coordinates(context, &mut x, &mut y) != glib::ffi::GFALSE)
+            .then_some((x, y))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

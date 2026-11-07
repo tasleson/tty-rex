@@ -43,7 +43,7 @@ use crate::container::{Container, Containers};
 use crate::dressing::{Dressing, DressingStyle};
 use crate::inspector::{Inspector, InspectorInit};
 use crate::leader::{self, LeaderKind};
-use crate::links::Links;
+use crate::links::{self, Links};
 use crate::palette;
 use crate::profile::Profile;
 use crate::profile_dialog::{CHANGE_PROFILE_LABEL, ProfileDialog};
@@ -74,6 +74,8 @@ const COPY_AS_HTML_ACTION: &str = "clipboard.copy-as-html";
 const COPY_LINK_ACTION: &str = "clipboard.copy-link";
 const OPEN_LINK_ACTION: &str = "terminal.open-link";
 const RESET_ACTION: &str = "tab.reset";
+/// VTE's signal around showing the context menu (`VteTerminal::setup-context-menu`).
+const SETUP_CONTEXT_MENU_SIGNAL: &str = "setup-context-menu";
 
 /// Title of the color dialog and tooltip of the color dot.
 const TAB_COLOR_TITLE: &str = "Tab Color";
@@ -469,26 +471,23 @@ fn install_terminal_actions(terminal: &vte::Terminal, links: &Links) {
             terminal.clipboard().set_text(url);
         }
     });
-    // Enables the link actions only over a link, before VTE opens the
-    // menu (`ptyxis_terminal_update_url_actions()`).
-    let menu_click = gtk::GestureClick::builder()
-        .button(gdk::BUTTON_SECONDARY)
-        .propagation_phase(gtk::PropagationPhase::Capture)
-        .build();
+    // Before VTE shows the menu, enables the link actions only over a link,
+    // and disables them again once it has gone, so a menu opened from the
+    // keyboard never offers a stale link (`ptyxis_terminal_setup_context_menu()`).
     let links_at = links.clone();
     let (open, copy) = (open_link.clone(), copy_link.clone());
     let target = Rc::clone(&url);
-    menu_click.connect_pressed(move |click, _, x, y| {
-        let Some(terminal) = click.widget().and_downcast::<vte::Terminal>() else {
-            return;
-        };
-        let found = links_at.at(&terminal, x, y);
+    terminal.connect_local(SETUP_CONTEXT_MENU_SIGNAL, false, move |values| {
+        let terminal = values.first()?.get::<vte::Terminal>().ok()?;
+        let found = values
+            .get(1)
+            .and_then(links::event_context_coordinates)
+            .and_then(|(x, y)| links_at.at(&terminal, x, y));
         open.set_enabled(found.is_some());
         copy.set_enabled(found.is_some());
         *target.borrow_mut() = found;
-        click.set_state(gtk::EventSequenceState::None);
+        None
     });
-    terminal.add_controller(menu_click);
     // Control-click opens the link (`ptyxis_terminal_click_pressed_cb()`).
     let open_click = gtk::GestureClick::builder()
         .button(0)
