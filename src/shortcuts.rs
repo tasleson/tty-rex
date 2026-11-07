@@ -35,141 +35,113 @@ use gtk::{gdk, gio, glib};
 use crate::config;
 use crate::settings::{self, SettingsError};
 
-/// Keys of the `org.gnome.Ptyxis.Shortcuts` schema used by the port.
-pub mod key {
-    pub const CLOSE_OTHER_TABS: &str = "close-other-tabs";
-    pub const CLOSE_TAB: &str = "close-tab";
-    pub const CLOSE_WINDOW: &str = "close-window";
-    pub const COPY_CLIPBOARD: &str = "copy-clipboard";
-    pub const DETACH_TAB: &str = "detach-tab";
-    pub const MOVE_NEXT_TAB: &str = "move-next-tab";
-    pub const MOVE_PREVIOUS_TAB: &str = "move-previous-tab";
-    pub const MOVE_TAB_LEFT: &str = "move-tab-left";
-    pub const MOVE_TAB_RIGHT: &str = "move-tab-right";
-    pub const NEW_TAB: &str = "new-tab";
-    pub const NEW_WINDOW: &str = "new-window";
-    pub const PASTE_CLIPBOARD: &str = "paste-clipboard";
-    pub const POPUP_MENU: &str = "popup-menu";
-    pub const PREFERENCES: &str = "preferences";
-    pub const PRIMARY_MENU: &str = "primary-menu";
-    pub const RESET: &str = "reset";
-    pub const RESET_AND_CLEAR: &str = "reset-and-clear";
-    pub const SELECT_ALL: &str = "select-all";
-    pub const SELECT_NONE: &str = "select-none";
-    pub const TAB_MENU: &str = "tab-menu";
-    pub const SHOW_KEYBOARD_SHORTCUTS: &str = "show-keyboard-shortcuts";
-    pub const SEARCH: &str = "search";
-    pub const SET_TITLE: &str = "set-title";
-    /// In tty-rex's own schema (see [`super::TTY_REX_KEYS`]).
-    pub const TOGGLE_TELEMETRY: &str = "toggle-telemetry";
-    pub const TAB_OVERVIEW: &str = "tab-overview";
-    pub const TOGGLE_FULLSCREEN: &str = "toggle-fullscreen";
-    pub const UNDO_CLOSE_TAB: &str = "undo-close-tab";
-    pub const ZOOM_IN: &str = "zoom-in";
-    pub const ZOOM_ONE: &str = "zoom-one";
-    pub const ZOOM_OUT: &str = "zoom-out";
-}
-
 /// GTK's widget action for showing a widget's context menu.
 const MENU_POPUP_ACTION: &str = "menu.popup";
 
-/// Shortcut setting key and the detailed action it activates, such as
-/// `win.focus-tab(3)`, which carries its target as the shortcut's arguments.
-pub const BINDINGS: &[(&str, &str)] = &[
-    (key::CLOSE_OTHER_TABS, "win.close-other-tabs"),
-    (key::CLOSE_TAB, "win.close-tab"),
-    // GTK's own action, as `action(window.close)` in `ptyxis-window.ui`.
-    (key::CLOSE_WINDOW, "window.close"),
-    (key::COPY_CLIPBOARD, "win.copy-clipboard"),
-    (key::DETACH_TAB, "win.detach-tab"),
-    ("focus-tab-1", "win.focus-tab(1)"),
-    ("focus-tab-10", "win.focus-tab(10)"),
-    ("focus-tab-2", "win.focus-tab(2)"),
-    ("focus-tab-3", "win.focus-tab(3)"),
-    ("focus-tab-4", "win.focus-tab(4)"),
-    ("focus-tab-5", "win.focus-tab(5)"),
-    ("focus-tab-6", "win.focus-tab(6)"),
-    ("focus-tab-7", "win.focus-tab(7)"),
-    ("focus-tab-8", "win.focus-tab(8)"),
-    ("focus-tab-9", "win.focus-tab(9)"),
-    ("focus-tab-last", "win.focus-tab(0)"),
-    (key::MOVE_NEXT_TAB, "win.next-tab"),
-    (key::MOVE_PREVIOUS_TAB, "win.previous-tab"),
-    (key::MOVE_TAB_LEFT, "win.move-tab-left"),
-    (key::MOVE_TAB_RIGHT, "win.move-tab-right"),
-    (key::NEW_TAB, "win.new-tab"),
-    (key::NEW_WINDOW, "win.new-window"),
-    (key::PASTE_CLIPBOARD, "win.paste-clipboard"),
-    // As `action(menu.popup)` in `ptyxis-terminal.ui`. VTE has no such
-    // action, so the key falls through to the terminal or the find bar
-    // entry (which opens its own menu) instead of being swallowed.
-    (key::POPUP_MENU, MENU_POPUP_ACTION),
-    (key::PREFERENCES, "win.preferences"),
-    (key::PRIMARY_MENU, "win.primary-menu"),
-    (key::RESET, "win.reset(false)"),
-    (key::RESET_AND_CLEAR, "win.reset(true)"),
-    (key::SHOW_KEYBOARD_SHORTCUTS, "win.show-keyboard-shortcuts"),
-    (key::SEARCH, "win.search"),
-    (key::SELECT_ALL, "win.select-all(true)"),
-    (key::SELECT_NONE, "win.select-all(false)"),
-    (key::SET_TITLE, "win.set-title"),
-    (key::TAB_MENU, "win.tab-menu"),
-    (key::TOGGLE_TELEMETRY, "win.toggle-telemetry"),
-    (key::TAB_OVERVIEW, "win.tab-overview"),
-    (key::TOGGLE_FULLSCREEN, "win.toggle-fullscreen"),
-    (key::UNDO_CLOSE_TAB, "win.undo-close-tab"),
-    (key::ZOOM_IN, "win.zoom-in"),
-    (key::ZOOM_ONE, "win.zoom-one"),
-    (key::ZOOM_OUT, "win.zoom-out"),
-];
+/// Defines every shortcut once, from its schema key, the detailed action
+/// it activates (such as `win.focus-tab(3)`, which carries its target as
+/// the shortcut's arguments), and its title and optional subtitle on the
+/// preferences Shortcuts page. This generates the [`key`] names,
+/// [`entry`] rows, [`BINDINGS`], [`ALL_KEYS`] and [`TTY_REX_KEYS`].
+macro_rules! shortcut_table {
+    (@subtitle) => { None };
+    (@subtitle $subtitle:literal) => { Some($subtitle) };
+    (
+        ptyxis: [$(
+            $name:ident = ($key:literal, $action:expr, $title:literal $(, $subtitle:literal)?)
+        ),+ $(,)?]
+        tty_rex: [$(
+            $tty_name:ident = ($tty_key:literal, $tty_action:expr, $tty_title:literal $(, $tty_subtitle:literal)?)
+        ),+ $(,)?]
+    ) => {
+        /// Shortcut keys: those of the `org.gnome.Ptyxis.Shortcuts` schema
+        /// and then tty-rex's own (see [`TTY_REX_KEYS`]).
+        pub mod key {
+            $(pub const $name: &str = $key;)+
+            $(pub const $tty_name: &str = $tty_key;)+
+        }
 
-/// Every key of the shortcuts schema, as in `src/ptyxis-shortcuts.defs`.
-pub const ALL_KEYS: &[&str] = &[
-    "close-other-tabs",
-    "close-tab",
-    "close-window",
-    "copy-clipboard",
-    "detach-tab",
-    "focus-tab-1",
-    "focus-tab-10",
-    "focus-tab-2",
-    "focus-tab-3",
-    "focus-tab-4",
-    "focus-tab-5",
-    "focus-tab-6",
-    "focus-tab-7",
-    "focus-tab-8",
-    "focus-tab-9",
-    "focus-tab-last",
-    "move-next-tab",
-    "move-previous-tab",
-    "move-tab-left",
-    "move-tab-right",
-    "new-tab",
-    "new-window",
-    "paste-clipboard",
-    "popup-menu",
-    "primary-menu",
-    "tab-menu",
-    "preferences",
-    "reset",
-    "reset-and-clear",
-    "search",
-    "select-all",
-    "select-none",
-    "tab-overview",
-    "toggle-fullscreen",
-    "undo-close-tab",
-    "zoom-in",
-    "zoom-one",
-    "zoom-out",
-    "set-title",
-    "show-keyboard-shortcuts",
-];
+        /// The Shortcuts page row of each key.
+        pub mod entry {
+            use super::ShortcutEntry;
+            $(pub const $name: ShortcutEntry = ShortcutEntry {
+                key: $key,
+                title: $title,
+                subtitle: shortcut_table!(@subtitle $($subtitle)?),
+            };)+
+            $(pub const $tty_name: ShortcutEntry = ShortcutEntry {
+                key: $tty_key,
+                title: $tty_title,
+                subtitle: shortcut_table!(@subtitle $($tty_subtitle)?),
+            };)+
+        }
 
-/// Every key of tty-rex's own shortcuts schema,
-/// [`config::TTY_REX_SHORTCUTS_SCHEMA_ID`].
-pub const TTY_REX_KEYS: &[&str] = &[key::TOGGLE_TELEMETRY];
+        /// Shortcut setting key and the detailed action it activates.
+        pub const BINDINGS: &[(&str, &str)] = &[
+            $((key::$name, $action),)+
+            $((key::$tty_name, $tty_action),)+
+        ];
+
+        /// Every key of the shortcuts schema, as in `src/ptyxis-shortcuts.defs`.
+        pub const ALL_KEYS: &[&str] = &[$(key::$name),+];
+
+        /// Every key of tty-rex's own shortcuts schema,
+        /// [`config::TTY_REX_SHORTCUTS_SCHEMA_ID`].
+        pub const TTY_REX_KEYS: &[&str] = &[$(key::$tty_name),+];
+    };
+}
+
+shortcut_table! {
+    ptyxis: [
+        CLOSE_OTHER_TABS = ("close-other-tabs", "win.close-other-tabs", "Close Other Tabs", "Close all tabs except the active tab"),
+        CLOSE_TAB = ("close-tab", "win.close-tab", "Close Tab", "Close the current tab"),
+        // GTK's own action, as `action(window.close)` in `ptyxis-window.ui`.
+        CLOSE_WINDOW = ("close-window", "window.close", "Close Window", "Close the current window"),
+        COPY_CLIPBOARD = ("copy-clipboard", "win.copy-clipboard", "Copy to Clipboard"),
+        DETACH_TAB = ("detach-tab", "win.detach-tab", "Move Tab to New Window", "Detach the current tab and move it to a new window"),
+        FOCUS_TAB_1 = ("focus-tab-1", "win.focus-tab(1)", "Switch to Tab 1"),
+        FOCUS_TAB_10 = ("focus-tab-10", "win.focus-tab(10)", "Switch to Tab 10"),
+        FOCUS_TAB_2 = ("focus-tab-2", "win.focus-tab(2)", "Switch to Tab 2"),
+        FOCUS_TAB_3 = ("focus-tab-3", "win.focus-tab(3)", "Switch to Tab 3"),
+        FOCUS_TAB_4 = ("focus-tab-4", "win.focus-tab(4)", "Switch to Tab 4"),
+        FOCUS_TAB_5 = ("focus-tab-5", "win.focus-tab(5)", "Switch to Tab 5"),
+        FOCUS_TAB_6 = ("focus-tab-6", "win.focus-tab(6)", "Switch to Tab 6"),
+        FOCUS_TAB_7 = ("focus-tab-7", "win.focus-tab(7)", "Switch to Tab 7"),
+        FOCUS_TAB_8 = ("focus-tab-8", "win.focus-tab(8)", "Switch to Tab 8"),
+        FOCUS_TAB_9 = ("focus-tab-9", "win.focus-tab(9)", "Switch to Tab 9"),
+        FOCUS_TAB_LAST = ("focus-tab-last", "win.focus-tab(0)", "Switch to Last Tab"),
+        MOVE_NEXT_TAB = ("move-next-tab", "win.next-tab", "Move to Next Tab"),
+        MOVE_PREVIOUS_TAB = ("move-previous-tab", "win.previous-tab", "Move to Previous Tab"),
+        MOVE_TAB_LEFT = ("move-tab-left", "win.move-tab-left", "Move Tab Left", "Move the tab one position to the left"),
+        MOVE_TAB_RIGHT = ("move-tab-right", "win.move-tab-right", "Move Tab Right", "Move the tab one position to the right"),
+        NEW_TAB = ("new-tab", "win.new-tab", "New Tab", "Open a new tab in the current window"),
+        NEW_WINDOW = ("new-window", "win.new-window", "New Window", "Open a new tab in a new window"),
+        PASTE_CLIPBOARD = ("paste-clipboard", "win.paste-clipboard", "Paste from Clipboard"),
+        // As `action(menu.popup)` in `ptyxis-terminal.ui`. VTE has no such
+        // action, so the key falls through to the terminal or the find bar
+        // entry (which opens its own menu) instead of being swallowed.
+        POPUP_MENU = ("popup-menu", MENU_POPUP_ACTION, "Show Context Menu"),
+        PREFERENCES = ("preferences", "win.preferences", "Preferences", "Show this preferences window"),
+        PRIMARY_MENU = ("primary-menu", "win.primary-menu", "Show Primary Menu", "Displays the primary menu for the terminal window"),
+        RESET = ("reset", "win.reset(false)", "Reset"),
+        RESET_AND_CLEAR = ("reset-and-clear", "win.reset(true)", "Reset and Clear"),
+        SHOW_KEYBOARD_SHORTCUTS = ("show-keyboard-shortcuts", "win.show-keyboard-shortcuts", "Keyboard Shortcuts", "Show the keyboard shortcuts configuration"),
+        SEARCH = ("search", "win.search", "Search History"),
+        SELECT_ALL = ("select-all", "win.select-all(true)", "Select All"),
+        SELECT_NONE = ("select-none", "win.select-all(false)", "Clear Selection"),
+        SET_TITLE = ("set-title", "win.set-title", "Set Title"),
+        TAB_MENU = ("tab-menu", "win.tab-menu", "Show New Tab Menu", "Displays the new tab menu for the terminal window"),
+        TAB_OVERVIEW = ("tab-overview", "win.tab-overview", "View Tab Overview", "Show an overview of all tabs within the window"),
+        TOGGLE_FULLSCREEN = ("toggle-fullscreen", "win.toggle-fullscreen", "Toggle Fullscreen", "Toggle in and out of fullscreen"),
+        UNDO_CLOSE_TAB = ("undo-close-tab", "win.undo-close-tab", "Undo Close Tab", "Undo closing the last tab"),
+        ZOOM_IN = ("zoom-in", "win.zoom-in", "Zoom In"),
+        ZOOM_ONE = ("zoom-one", "win.zoom-one", "Reset Zoom"),
+        ZOOM_OUT = ("zoom-out", "win.zoom-out", "Zoom Out"),
+    ]
+    tty_rex: [
+        TOGGLE_TELEMETRY = ("toggle-telemetry", "win.toggle-telemetry", "Show Telemetry", "Toggle network, CPU and memory readings for the current tab"),
+    ]
+}
 
 /// The schema id and path holding the shortcut `key`.
 fn schema_of(key: &str) -> (&'static str, &'static str) {
@@ -191,26 +163,6 @@ pub struct ShortcutEntry {
     pub subtitle: Option<&'static str>,
 }
 
-const fn entry(key: &'static str, title: &'static str) -> ShortcutEntry {
-    ShortcutEntry {
-        key,
-        title,
-        subtitle: None,
-    }
-}
-
-const fn described(
-    key: &'static str,
-    title: &'static str,
-    subtitle: &'static str,
-) -> ShortcutEntry {
-    ShortcutEntry {
-        key,
-        title,
-        subtitle: Some(subtitle),
-    }
-}
-
 /// A group on the Shortcuts page: optional title and its rows.
 pub type ShortcutGroup = (Option<&'static str>, &'static [ShortcutEntry]);
 
@@ -218,155 +170,61 @@ pub type ShortcutGroup = (Option<&'static str>, &'static [ShortcutEntry]);
 pub const EDITOR_GROUPS: &[ShortcutGroup] = &[
     (
         Some("Terminal"),
+        &[entry::COPY_CLIPBOARD, entry::PASTE_CLIPBOARD],
+    ),
+    (None, &[entry::SELECT_ALL, entry::SELECT_NONE]),
+    (None, &[entry::RESET, entry::RESET_AND_CLEAR]),
+    (None, &[entry::SEARCH, entry::TOGGLE_TELEMETRY]),
+    (None, &[entry::POPUP_MENU]),
+    (Some("Windows"), &[entry::NEW_WINDOW, entry::CLOSE_WINDOW]),
+    (None, &[entry::SET_TITLE]),
+    (Some("Tabs"), &[entry::NEW_TAB]),
+    (None, &[entry::TAB_OVERVIEW]),
+    (
+        None,
         &[
-            entry("copy-clipboard", "Copy to Clipboard"),
-            entry("paste-clipboard", "Paste from Clipboard"),
+            entry::CLOSE_TAB,
+            entry::CLOSE_OTHER_TABS,
+            entry::UNDO_CLOSE_TAB,
+        ],
+    ),
+    (None, &[entry::MOVE_PREVIOUS_TAB, entry::MOVE_NEXT_TAB]),
+    (
+        None,
+        &[
+            entry::MOVE_TAB_LEFT,
+            entry::MOVE_TAB_RIGHT,
+            entry::DETACH_TAB,
         ],
     ),
     (
         None,
         &[
-            entry("select-all", "Select All"),
-            entry("select-none", "Clear Selection"),
-        ],
-    ),
-    (
-        None,
-        &[
-            entry("reset", "Reset"),
-            entry("reset-and-clear", "Reset and Clear"),
-        ],
-    ),
-    (
-        None,
-        &[
-            entry("search", "Search History"),
-            described(
-                key::TOGGLE_TELEMETRY,
-                "Show Telemetry",
-                "Toggle network, CPU and memory readings for the current tab",
-            ),
-        ],
-    ),
-    (None, &[entry("popup-menu", "Show Context Menu")]),
-    (
-        Some("Windows"),
-        &[
-            described("new-window", "New Window", "Open a new tab in a new window"),
-            described("close-window", "Close Window", "Close the current window"),
-        ],
-    ),
-    (None, &[entry("set-title", "Set Title")]),
-    (
-        Some("Tabs"),
-        &[described(
-            "new-tab",
-            "New Tab",
-            "Open a new tab in the current window",
-        )],
-    ),
-    (
-        None,
-        &[described(
-            "tab-overview",
-            "View Tab Overview",
-            "Show an overview of all tabs within the window",
-        )],
-    ),
-    (
-        None,
-        &[
-            described("close-tab", "Close Tab", "Close the current tab"),
-            described(
-                "close-other-tabs",
-                "Close Other Tabs",
-                "Close all tabs except the active tab",
-            ),
-            described(
-                "undo-close-tab",
-                "Undo Close Tab",
-                "Undo closing the last tab",
-            ),
-        ],
-    ),
-    (
-        None,
-        &[
-            entry("move-previous-tab", "Move to Previous Tab"),
-            entry("move-next-tab", "Move to Next Tab"),
-        ],
-    ),
-    (
-        None,
-        &[
-            described(
-                "move-tab-left",
-                "Move Tab Left",
-                "Move the tab one position to the left",
-            ),
-            described(
-                "move-tab-right",
-                "Move Tab Right",
-                "Move the tab one position to the right",
-            ),
-            described(
-                "detach-tab",
-                "Move Tab to New Window",
-                "Detach the current tab and move it to a new window",
-            ),
-        ],
-    ),
-    (
-        None,
-        &[
-            entry("focus-tab-1", "Switch to Tab 1"),
-            entry("focus-tab-2", "Switch to Tab 2"),
-            entry("focus-tab-3", "Switch to Tab 3"),
-            entry("focus-tab-4", "Switch to Tab 4"),
-            entry("focus-tab-5", "Switch to Tab 5"),
-            entry("focus-tab-6", "Switch to Tab 6"),
-            entry("focus-tab-7", "Switch to Tab 7"),
-            entry("focus-tab-8", "Switch to Tab 8"),
-            entry("focus-tab-9", "Switch to Tab 9"),
-            entry("focus-tab-10", "Switch to Tab 10"),
-            entry("focus-tab-last", "Switch to Last Tab"),
+            entry::FOCUS_TAB_1,
+            entry::FOCUS_TAB_2,
+            entry::FOCUS_TAB_3,
+            entry::FOCUS_TAB_4,
+            entry::FOCUS_TAB_5,
+            entry::FOCUS_TAB_6,
+            entry::FOCUS_TAB_7,
+            entry::FOCUS_TAB_8,
+            entry::FOCUS_TAB_9,
+            entry::FOCUS_TAB_10,
+            entry::FOCUS_TAB_LAST,
         ],
     ),
     (
         Some("Zoom"),
-        &[
-            entry("zoom-in", "Zoom In"),
-            entry("zoom-out", "Zoom Out"),
-            entry("zoom-one", "Reset Zoom"),
-        ],
+        &[entry::ZOOM_IN, entry::ZOOM_OUT, entry::ZOOM_ONE],
     ),
-    (
-        Some("Application"),
-        &[described(
-            "toggle-fullscreen",
-            "Toggle Fullscreen",
-            "Toggle in and out of fullscreen",
-        )],
-    ),
+    (Some("Application"), &[entry::TOGGLE_FULLSCREEN]),
     (
         None,
         &[
-            described(
-                "primary-menu",
-                "Show Primary Menu",
-                "Displays the primary menu for the terminal window",
-            ),
-            described(
-                "tab-menu",
-                "Show New Tab Menu",
-                "Displays the new tab menu for the terminal window",
-            ),
-            described("preferences", "Preferences", "Show this preferences window"),
-            described(
-                "show-keyboard-shortcuts",
-                "Keyboard Shortcuts",
-                "Show the keyboard shortcuts configuration",
-            ),
+            entry::PRIMARY_MENU,
+            entry::TAB_MENU,
+            entry::PREFERENCES,
+            entry::SHOW_KEYBOARD_SHORTCUTS,
         ],
     ),
 ];
@@ -644,7 +502,6 @@ mod tests {
             (key::SELECT_NONE, "win.select-all(false)".to_string()),
             (key::SET_TITLE, SetTitleAction::action_name()),
             (key::TAB_MENU, TabMenuAction::action_name()),
-            (key::TOGGLE_TELEMETRY, ToggleTelemetryAction::action_name()),
             (key::TAB_OVERVIEW, TabOverviewAction::action_name()),
             (
                 key::TOGGLE_FULLSCREEN,
@@ -654,6 +511,7 @@ mod tests {
             (key::ZOOM_IN, ZoomInAction::action_name()),
             (key::ZOOM_ONE, ZoomOneAction::action_name()),
             (key::ZOOM_OUT, ZoomOutAction::action_name()),
+            (key::TOGGLE_TELEMETRY, ToggleTelemetryAction::action_name()),
         ];
         assert_eq!(BINDINGS.len(), expected.len());
         for ((key, action), (expected_key, expected_action)) in BINDINGS.iter().zip(&expected) {

@@ -33,89 +33,65 @@ use gtk::{gdk, gio, glib, pango};
 use crate::config;
 use crate::palette::HighlightColors;
 
+/// Defines the setting keys of one schema as `&str` constants and lists
+/// them in `ALL`, for validation against the schema.
+macro_rules! schema_keys {
+    ($($(#[$meta:meta])* $name:ident = $key:literal;)+) => {
+        $($(#[$meta])* pub const $name: &str = $key;)+
+        /// All keys, for validation against the schema.
+        pub const ALL: &[&str] = &[$($name),+];
+    };
+}
+pub(crate) use schema_keys;
+
 /// Keys of the `org.gnome.Ptyxis` schema used by the port.
 pub mod key {
-    pub const AUDIBLE_BELL: &str = "audible-bell";
-    pub const CURSOR_BLINK_MODE: &str = "cursor-blink-mode";
-    pub const CURSOR_SHAPE: &str = "cursor-shape";
-    pub const DEFAULT_COLUMNS: &str = "default-columns";
-    pub const DEFAULT_PROFILE_UUID: &str = "default-profile-uuid";
-    pub const DEFAULT_ROWS: &str = "default-rows";
-    pub const DISABLE_DYNAMIC_TITLE: &str = "disable-dynamic-title";
-    pub const DISABLE_PADDING: &str = "disable-padding";
-    pub const ENABLE_A11Y: &str = "enable-a11y";
-    pub const ENABLE_ZOOM_SCROLL_CTRL: &str = "enable-zoom-scroll-ctrl";
-    pub const FONT_NAME: &str = "font-name";
-    pub const IGNORE_OSC_TITLE: &str = "ignore-osc-title";
-    pub const INHIBIT_LOGOUT: &str = "inhibit-logout";
-    pub const INTERFACE_STYLE: &str = "interface-style";
-    pub const NEW_TAB_POSITION: &str = "new-tab-position";
-    pub const PROFILE_UUIDS: &str = "profile-uuids";
-    pub const PROMPT_ON_CLOSE: &str = "prompt-on-close";
-    pub const RESTORE_SESSION: &str = "restore-session";
-    pub const RESTORE_WINDOW_SIZE: &str = "restore-window-size";
-    pub const SCROLLBAR_POLICY: &str = "scrollbar-policy";
-    pub const SHOW_WINDOW_SIZE: &str = "show-window-size";
-    pub const TAB_MIDDLE_CLICK: &str = "tab-middle-click";
-    pub const TEXT_BLINK_MODE: &str = "text-blink-mode";
-    pub const TOAST_ON_COPY_CLIPBOARD: &str = "toast-on-copy-clipboard";
-    pub const USE_SYSTEM_FONT: &str = "use-system-font";
-    pub const VISUAL_BELL: &str = "visual-bell";
-    pub const VISUAL_PROCESS_LEADER: &str = "visual-process-leader";
-    pub const WINDOW_SIZE: &str = "window-size";
-    pub const WORD_CHAR_EXCEPTIONS: &str = "word-char-exceptions";
-
-    /// All keys, for validation against the schema template.
-    pub const ALL: &[&str] = &[
-        AUDIBLE_BELL,
-        CURSOR_BLINK_MODE,
-        CURSOR_SHAPE,
-        DEFAULT_COLUMNS,
-        DEFAULT_PROFILE_UUID,
-        DEFAULT_ROWS,
-        DISABLE_DYNAMIC_TITLE,
-        DISABLE_PADDING,
-        ENABLE_A11Y,
-        ENABLE_ZOOM_SCROLL_CTRL,
-        FONT_NAME,
-        IGNORE_OSC_TITLE,
-        INHIBIT_LOGOUT,
-        INTERFACE_STYLE,
-        NEW_TAB_POSITION,
-        PROFILE_UUIDS,
-        PROMPT_ON_CLOSE,
-        RESTORE_SESSION,
-        RESTORE_WINDOW_SIZE,
-        SCROLLBAR_POLICY,
-        SHOW_WINDOW_SIZE,
-        TAB_MIDDLE_CLICK,
-        TEXT_BLINK_MODE,
-        TOAST_ON_COPY_CLIPBOARD,
-        USE_SYSTEM_FONT,
-        VISUAL_BELL,
-        VISUAL_PROCESS_LEADER,
-        WINDOW_SIZE,
-        WORD_CHAR_EXCEPTIONS,
-    ];
+    schema_keys! {
+        AUDIBLE_BELL = "audible-bell";
+        CURSOR_BLINK_MODE = "cursor-blink-mode";
+        CURSOR_SHAPE = "cursor-shape";
+        DEFAULT_COLUMNS = "default-columns";
+        DEFAULT_PROFILE_UUID = "default-profile-uuid";
+        DEFAULT_ROWS = "default-rows";
+        DISABLE_DYNAMIC_TITLE = "disable-dynamic-title";
+        DISABLE_PADDING = "disable-padding";
+        ENABLE_A11Y = "enable-a11y";
+        ENABLE_ZOOM_SCROLL_CTRL = "enable-zoom-scroll-ctrl";
+        FONT_NAME = "font-name";
+        IGNORE_OSC_TITLE = "ignore-osc-title";
+        INHIBIT_LOGOUT = "inhibit-logout";
+        INTERFACE_STYLE = "interface-style";
+        NEW_TAB_POSITION = "new-tab-position";
+        PROFILE_UUIDS = "profile-uuids";
+        PROMPT_ON_CLOSE = "prompt-on-close";
+        RESTORE_SESSION = "restore-session";
+        RESTORE_WINDOW_SIZE = "restore-window-size";
+        SCROLLBAR_POLICY = "scrollbar-policy";
+        SHOW_WINDOW_SIZE = "show-window-size";
+        TAB_MIDDLE_CLICK = "tab-middle-click";
+        TEXT_BLINK_MODE = "text-blink-mode";
+        TOAST_ON_COPY_CLIPBOARD = "toast-on-copy-clipboard";
+        USE_SYSTEM_FONT = "use-system-font";
+        VISUAL_BELL = "visual-bell";
+        VISUAL_PROCESS_LEADER = "visual-process-leader";
+        WINDOW_SIZE = "window-size";
+        WORD_CHAR_EXCEPTIONS = "word-char-exceptions";
+    }
 }
 
 /// Keys of tty-rex's own schema, [`config::TTY_REX_SCHEMA_ID`].
 pub mod tty_rex_key {
-    /// Window highlight backgrounds as CSS colors; empty means the
-    /// palette's own color. They are always drawn opaque.
-    pub const SUPERUSER_HIGHLIGHT_COLOR: &str = "superuser-highlight-color";
-    pub const REMOTE_HIGHLIGHT_COLOR: &str = "remote-highlight-color";
-    /// Seconds between telemetry footer updates.
-    pub const TELEMETRY_INTERVAL: &str = "telemetry-interval";
+    schema_keys! {
+        /// Window highlight backgrounds as CSS colors; empty means the
+        /// palette's own color. They are always drawn opaque.
+        SUPERUSER_HIGHLIGHT_COLOR = "superuser-highlight-color";
+        REMOTE_HIGHLIGHT_COLOR = "remote-highlight-color";
+        /// Seconds between telemetry footer updates.
+        TELEMETRY_INTERVAL = "telemetry-interval";
+    }
 
     /// The CSS color keys.
     pub const COLOR_KEYS: &[&str] = &[SUPERUSER_HIGHLIGHT_COLOR, REMOTE_HIGHLIGHT_COLOR];
-    /// All keys, for validation against the schema.
-    pub const ALL: &[&str] = &[
-        SUPERUSER_HIGHLIGHT_COLOR,
-        REMOTE_HIGHLIGHT_COLOR,
-        TELEMETRY_INTERVAL,
-    ];
 }
 
 /// Range and default of [`tty_rex_key::TELEMETRY_INTERVAL`] in seconds,
@@ -235,7 +211,7 @@ macro_rules! nick_enum {
                 Self::from_nick(nick).unwrap_or(Self::$default)
             }
 
-            pub fn nick(self) -> &'static str {
+            pub const fn nick(self) -> &'static str {
                 match self {
                     $(Self::$variant => $nick),+
                 }

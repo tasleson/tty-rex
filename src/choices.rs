@@ -28,60 +28,79 @@ pub struct Choice {
     pub nick: &'static str,
 }
 
+use crate::settings::{
+    CjkAmbiguousWidth, CursorBlinkMode, CursorShape, EraseBinding, ExitAction, NewTabPosition,
+    PreserveContainer, PreserveDirectory, TextBlinkMode,
+};
+
 const fn choice(title: &'static str, nick: &'static str) -> Choice {
     Choice { title, nick }
 }
 
-pub const TEXT_BLINK_MODES: &[Choice] = &[
-    choice("Never", "never"),
-    choice("Focused", "focused"),
-    choice("Unfocused", "unfocused"),
-    choice("Always", "always"),
-];
+/// Defines a list of choices for the settings enum `$ty`: each variant
+/// with its title, in the order of the combo row. The nicks come from the
+/// enum, and the list must cover every variant or the build fails.
+macro_rules! enum_choices {
+    ($name:ident: $ty:ident [$($variant:ident => $title:literal),+ $(,)?]) => {
+        pub const $name: &[Choice] = &[$(Choice {
+            title: $title,
+            nick: $ty::$variant.nick(),
+        }),+];
+        const _: () = assert!($name.len() == $ty::ALL.len());
+    };
+}
 
-pub const CURSOR_SHAPES: &[Choice] = &[
-    choice("Block", "block"),
-    choice("I-Beam", "ibeam"),
-    choice("Underline", "underline"),
-];
+enum_choices!(TEXT_BLINK_MODES: TextBlinkMode [
+    Never => "Never",
+    Focused => "Focused",
+    Unfocused => "Unfocused",
+    Always => "Always",
+]);
 
-pub const CURSOR_BLINK_MODES: &[Choice] = &[
-    choice("Follow System", "system"),
-    choice("Enabled", "on"),
-    choice("Disabled", "off"),
-];
+enum_choices!(CURSOR_SHAPES: CursorShape [
+    Block => "Block",
+    Ibeam => "I-Beam",
+    Underline => "Underline",
+]);
 
-pub const TAB_POSITIONS: &[Choice] = &[choice("Next", "next"), choice("Last", "last")];
+enum_choices!(CURSOR_BLINK_MODES: CursorBlinkMode [
+    System => "Follow System",
+    On => "Enabled",
+    Off => "Disabled",
+]);
 
+enum_choices!(TAB_POSITIONS: NewTabPosition [Next => "Next", Last => "Last"]);
+
+/// Not an enum in [`crate::settings`], which reads the policy as a string.
 pub const SCROLLBAR_POLICIES: &[Choice] = &[
     choice("Never", "never"),
     choice("Follow System", "system"),
     choice("Always", "always"),
 ];
 
-pub const PRESERVE_DIRECTORIES: &[Choice] = &[
-    choice("Never", "never"),
-    choice("Safe", "safe"),
-    choice("Always", "always"),
-];
+enum_choices!(PRESERVE_DIRECTORIES: PreserveDirectory [
+    Never => "Never",
+    Safe => "Safe",
+    Always => "Always",
+]);
 
-pub const PRESERVE_CONTAINERS: &[Choice] = &[choice("Never", "never"), choice("Always", "always")];
+enum_choices!(PRESERVE_CONTAINERS: PreserveContainer [Never => "Never", Always => "Always"]);
 
-pub const EXIT_ACTIONS: &[Choice] = &[
-    choice("No Action", "none"),
-    choice("Restart", "restart"),
-    choice("Close", "close"),
-];
+enum_choices!(EXIT_ACTIONS: ExitAction [
+    None => "No Action",
+    Restart => "Restart",
+    Close => "Close",
+]);
 
-pub const CJK_AMBIGUOUS_WIDTHS: &[Choice] = &[choice("Narrow", "narrow"), choice("Wide", "wide")];
+enum_choices!(CJK_AMBIGUOUS_WIDTHS: CjkAmbiguousWidth [Narrow => "Narrow", Wide => "Wide"]);
 
-pub const ERASE_BINDINGS: &[Choice] = &[
-    choice("Automatic", "auto"),
-    choice("Control-H", "ascii-backspace"),
-    choice("ASCII DEL", "ascii-delete"),
-    choice("Escape Sequence", "delete-sequence"),
-    choice("TTY Erase", "tty"),
-];
+enum_choices!(ERASE_BINDINGS: EraseBinding [
+    Auto => "Automatic",
+    AsciiBackspace => "Control-H",
+    AsciiDelete => "ASCII DEL",
+    DeleteSequence => "Escape Sequence",
+    Tty => "TTY Erase",
+]);
 
 /// Position of `nick` in `choices` (`string_to_index()` in the C code).
 pub fn index_of(choices: &[Choice], nick: &str) -> Option<u32> {

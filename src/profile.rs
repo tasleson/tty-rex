@@ -31,54 +31,30 @@ use crate::settings::{
 
 /// Keys of the `org.gnome.Ptyxis.Profile` schema used by the port.
 pub mod key {
-    pub const BACKSPACE_BINDING: &str = "backspace-binding";
-    pub const BOLD_IS_BRIGHT: &str = "bold-is-bright";
-    pub const CELL_HEIGHT_SCALE: &str = "cell-height-scale";
-    pub const CELL_WIDTH_SCALE: &str = "cell-width-scale";
-    pub const CJK_AMBIGUOUS_WIDTH: &str = "cjk-ambiguous-width";
-    pub const CUSTOM_COMMAND: &str = "custom-command";
-    pub const CUSTOM_LINKS: &str = "custom-links";
-    pub const DEFAULT_CONTAINER: &str = "default-container";
-    pub const DELETE_BINDING: &str = "delete-binding";
-    pub const EXIT_ACTION: &str = "exit-action";
-    pub const LABEL: &str = "label";
-    pub const LIMIT_SCROLLBACK: &str = "limit-scrollback";
-    pub const LOGIN_SHELL: &str = "login-shell";
-    pub const OPACITY: &str = "opacity";
-    pub const PALETTE: &str = "palette";
-    pub const PRESERVE_CONTAINER: &str = "preserve-container";
-    pub const PRESERVE_DIRECTORY: &str = "preserve-directory";
-    pub const SCROLL_ON_KEYSTROKE: &str = "scroll-on-keystroke";
-    pub const SCROLL_ON_OUTPUT: &str = "scroll-on-output";
-    pub const SCROLLBACK_LINES: &str = "scrollback-lines";
-    pub const USE_CUSTOM_COMMAND: &str = "use-custom-command";
-    pub const USE_PROXY: &str = "use-proxy";
-
-    /// All keys, for validation against the schema template.
-    pub const ALL: &[&str] = &[
-        BACKSPACE_BINDING,
-        BOLD_IS_BRIGHT,
-        CELL_HEIGHT_SCALE,
-        CELL_WIDTH_SCALE,
-        CJK_AMBIGUOUS_WIDTH,
-        CUSTOM_COMMAND,
-        CUSTOM_LINKS,
-        DEFAULT_CONTAINER,
-        DELETE_BINDING,
-        EXIT_ACTION,
-        LABEL,
-        LIMIT_SCROLLBACK,
-        LOGIN_SHELL,
-        OPACITY,
-        PALETTE,
-        PRESERVE_CONTAINER,
-        PRESERVE_DIRECTORY,
-        SCROLL_ON_KEYSTROKE,
-        SCROLL_ON_OUTPUT,
-        SCROLLBACK_LINES,
-        USE_CUSTOM_COMMAND,
-        USE_PROXY,
-    ];
+    crate::settings::schema_keys! {
+        BACKSPACE_BINDING = "backspace-binding";
+        BOLD_IS_BRIGHT = "bold-is-bright";
+        CELL_HEIGHT_SCALE = "cell-height-scale";
+        CELL_WIDTH_SCALE = "cell-width-scale";
+        CJK_AMBIGUOUS_WIDTH = "cjk-ambiguous-width";
+        CUSTOM_COMMAND = "custom-command";
+        CUSTOM_LINKS = "custom-links";
+        DEFAULT_CONTAINER = "default-container";
+        DELETE_BINDING = "delete-binding";
+        EXIT_ACTION = "exit-action";
+        LABEL = "label";
+        LIMIT_SCROLLBACK = "limit-scrollback";
+        LOGIN_SHELL = "login-shell";
+        OPACITY = "opacity";
+        PALETTE = "palette";
+        PRESERVE_CONTAINER = "preserve-container";
+        PRESERVE_DIRECTORY = "preserve-directory";
+        SCROLL_ON_KEYSTROKE = "scroll-on-keystroke";
+        SCROLL_ON_OUTPUT = "scroll-on-output";
+        SCROLLBACK_LINES = "scrollback-lines";
+        USE_CUSTOM_COMMAND = "use-custom-command";
+        USE_PROXY = "use-proxy";
+    }
 }
 
 /// Shown when a profile has no label, as in `ptyxis_profile_dup_label()`.
