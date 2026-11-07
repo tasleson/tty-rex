@@ -57,7 +57,7 @@ When a shell that reports its commands through VTE's `vte.sh` finishes
 a command that ran for a quarter second or more in a tab you are not
 looking at, the tab is flagged; if the window is not focused, a "Command completed" desktop
 notification also names the command, and clicking it brings that tab
-forward. Unlike Ptyxis, tty-rex does not set the X11 urgency hint.
+forward. On X11 the window's urgency hint is set too, as in Ptyxis.
 
 Beyond Ptyxis, "Show Telemetry" in the terminal's context menu
 (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> by default) toggles a footer

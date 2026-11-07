@@ -121,11 +121,30 @@ pub fn show(tab_root: &gtk::Box, uuid: &str, cmdline: &str) {
         return;
     }
     if delivery == Delivery::Notification {
+        if let Some(window) = &window {
+            set_urgency_hint(window, true);
+        }
         send_notification(uuid, cmdline);
     }
     if let Some((_, page)) = page {
         page.set_needs_attention(true);
     }
+}
+
+/// Sets or clears the X11 urgency hint of `window`, through which X11
+/// window managers flag it; other backends have no such hint. The window
+/// clears it again once it becomes active
+/// (`ptyxis_window_notify_is_active_cb()`).
+pub fn set_urgency_hint(window: &gtk::Window, urgent: bool) {
+    #[cfg(feature = "x11")]
+    if let Some(surface) = window.surface().and_downcast::<gdk_x11::X11Surface>() {
+        // Deprecated with the rest of the X11 backend in GTK 4.18, which
+        // Ptyxis still uses.
+        #[allow(deprecated)]
+        surface.set_urgency_hint(urgent);
+    }
+    #[cfg(not(feature = "x11"))]
+    let _ = (window, urgent);
 }
 
 fn send_notification(uuid: &str, cmdline: &str) {

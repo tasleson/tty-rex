@@ -42,6 +42,7 @@ use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
 use crate::parking_lot::{self, ParkingLot};
 use crate::settings::NewTabPosition;
 use crate::shortcuts::Shortcuts;
+use crate::tab_notify;
 use crate::telemetry_bar::{TelemetryBar, TelemetryBarInput};
 use crate::terminal;
 use crate::title_dialog::SET_TITLE_LABEL;
@@ -1113,6 +1114,13 @@ impl Component for Window {
                 parked: Rc::clone(&closing_parked),
             }
             .request(single_terminal)
+        });
+
+        // Like ptyxis_window_notify_is_active_cb().
+        window.connect_is_active_notify(|window| {
+            if window.is_active() {
+                tab_notify::set_urgency_hint(window.upcast_ref(), false);
+            }
         });
 
         let model = Window {
