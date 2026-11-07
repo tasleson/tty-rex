@@ -268,6 +268,9 @@ pub struct Window {
     _shortcuts: Option<Shortcuts>,
     /// Disabled without a selection so the shortcut reaches the terminal.
     copy_action: gio::SimpleAction,
+    /// Enabled only while a tab is selected and the clipboard offers text
+    /// (`ptyxis_terminal_update_clipboard_actions()`).
+    paste_action: gio::SimpleAction,
     /// `win.zoom-in`, `win.zoom-out` and `win.zoom-one`, enabled as the
     /// selected tab's zoom allows, and the primary menu's zoom label.
     zoom_controls: ZoomControls,
@@ -493,6 +496,7 @@ impl Window {
             }
         }
         self.copy_action.set_enabled(false);
+        update_paste_action(&self.paste_action, &self.tab_view);
         // Shows which tab is now selected when in fullscreen.
         self.fullscreen_box.reveal();
         let tab = page.as_ref().and_then(|page| self.app.tab(&page.child()));
@@ -1158,6 +1162,41 @@ fn track_set_profile(
         .connect_items_changed(move |_, _, _, _| update());
 }
 
+/// Whether `win.paste-clipboard` applies: Ptyxis's `clipboard.paste` lives
+/// on the terminal, so it needs a tab, and is enabled only while the
+/// clipboard offers text (`ptyxis_terminal_update_clipboard_actions()`).
+fn update_paste_action(action: &gio::SimpleAction, tab_view: &adw::TabView) {
+    let clipboard = tab_view.clipboard();
+    action.set_enabled(
+        tab_view.selected_page().is_some() && terminal::clipboard_has_text(&clipboard),
+    );
+}
+
+/// Re-checks `win.paste-clipboard` whenever the clipboard changes, as each
+/// `PtyxisTerminal` does from its clipboard's `changed` signal. The
+/// clipboard is the display's and outlives the window, so the handler holds
+/// weak references and goes away with the window.
+fn track_clipboard(
+    window: &adw::ApplicationWindow,
+    tab_view: &adw::TabView,
+    action: &gio::SimpleAction,
+) {
+    let clipboard = tab_view.clipboard();
+    let weak_view = tab_view.downgrade();
+    let weak_action = action.downgrade();
+    let id = clipboard.connect_changed(move |_| {
+        if let (Some(tab_view), Some(action)) = (weak_view.upgrade(), weak_action.upgrade()) {
+            update_paste_action(&action, &tab_view);
+        }
+    });
+    let id = Cell::new(Some(id));
+    window.connect_destroy(move |_| {
+        if let Some(id) = id.take() {
+            clipboard.disconnect(id);
+        }
+    });
+}
+
 /// Keeps `win.pin-tab` / `win.unpin-tab` in line with the selected page
 /// (`ptyxis_window_selected_page_notify_pinned_cb()`).
 ///
@@ -1539,7 +1578,9 @@ impl Component for Window {
             add_action::<PreviousTabAction>(&window, &sender, || WindowInput::PreviousTab);
         let copy_action = add_action::<CopyAction>(&window, &sender, || WindowInput::Copy);
         copy_action.set_enabled(false);
-        add_action::<PasteAction>(&window, &sender, || WindowInput::Paste);
+        let paste_action = add_action::<PasteAction>(&window, &sender, || WindowInput::Paste);
+        paste_action.set_enabled(false);
+        track_clipboard(&window, &tab_view, &paste_action);
         let zoom_controls = ZoomControls {
             zoom_in: add_action::<ZoomInAction>(&window, &sender, || WindowInput::ZoomIn),
             zoom_out: add_action::<ZoomOutAction>(&window, &sender, || WindowInput::ZoomOut),
@@ -1712,6 +1753,7 @@ impl Component for Window {
             telemetry_revealer,
             _shortcuts: shortcuts,
             copy_action,
+            paste_action,
             zoom_controls,
             _pinned_signals: pinned_signals,
             terminal_handlers: None,

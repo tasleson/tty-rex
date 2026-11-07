@@ -316,10 +316,12 @@ pub fn connect_commit_bytes(
 /// Whether the clipboard holds text to paste
 /// (`ptyxis_terminal_can_paste()`).
 pub fn can_paste(terminal: &vte::Terminal) -> bool {
-    terminal
-        .clipboard()
-        .formats()
-        .contains_type(glib::Type::STRING)
+    clipboard_has_text(&terminal.clipboard())
+}
+
+/// Whether `clipboard` offers text, the check behind [`can_paste`].
+pub fn clipboard_has_text(clipboard: &gtk::gdk::Clipboard) -> bool {
+    clipboard.formats().contains_type(glib::Type::STRING)
 }
 
 /// Pastes the clipboard, then follows it to the bottom of the scrollback
