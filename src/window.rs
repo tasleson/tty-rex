@@ -133,6 +133,12 @@ relm4::new_stateless_action!(pub SetTabColorAction, WindowActions, "set-tab-colo
 relm4::new_stateless_action!(pub ResetTabColorAction, WindowActions, "reset-tab-color");
 relm4::new_stateless_action!(pub TabOverviewAction, WindowActions, "tab-overview");
 relm4::new_stateless_action!(pub PreferencesAction, WindowActions, "preferences");
+// Shortcut-only actions of `ptyxis-window.ui` and `ptyxis-terminal.ui`;
+// `win.focus-tab(n)`, `win.reset(b)` and `win.select-all(b)` take a target
+// and are added by `add_shortcut_actions()`.
+relm4::new_stateless_action!(pub PrimaryMenuAction, WindowActions, "primary-menu");
+relm4::new_stateless_action!(pub TabMenuAction, WindowActions, "tab-menu");
+relm4::new_stateless_action!(pub PopupMenuAction, WindowActions, "popup-menu");
 relm4::new_stateless_action!(
     pub ShowKeyboardShortcutsAction,
     WindowActions,
@@ -762,6 +768,102 @@ fn release_parked(app: &App, parked: &RefCell<ParkingLot<gtk::Widget>>) {
     }
 }
 
+/// Adds the actions only keyboard shortcuts activate. Ptyxis installs
+/// `tab.focus(i)` on the window, `menu.popup` is VTE's and the terminal
+/// shortcuts act on the terminal in focus; here they are window actions
+/// working on the selected tab's terminal.
+///
+/// `win.focus-tab(n)` selects the nth tab, or the last for 0 or a number
+/// past the end (`ptyxis_window_tab_focus_action()`).
+fn add_shortcut_actions(
+    window: &adw::ApplicationWindow,
+    app: &Rc<App>,
+    tab_view: &adw::TabView,
+    primary_menu_button: &gtk::MenuButton,
+    new_tab_button: &adw::SplitButton,
+) {
+    let weak = tab_view.downgrade();
+    let focus_tab = gio::SimpleAction::new("focus-tab", Some(glib::VariantTy::INT32));
+    focus_tab.connect_activate(move |_, position| {
+        let (Some(tab_view), Some(position)) =
+            (weak.upgrade(), position.and_then(|v| v.get::<i32>()))
+        else {
+            return;
+        };
+        let n_pages = tab_view.n_pages();
+        if n_pages == 0 {
+            return;
+        }
+        let nth = match position {
+            1..=i32::MAX if position <= n_pages => position - 1,
+            _ => n_pages - 1,
+        };
+        tab_view.set_selected_page(&tab_view.nth_page(nth));
+    });
+    window.add_action(&focus_tab);
+
+    let terminal_action = |name: &str,
+                           target: Option<&glib::VariantTy>,
+                           run: fn(&vte::Terminal, Option<bool>)| {
+        let action = gio::SimpleAction::new(name, target);
+        let weak_app = Rc::downgrade(app);
+        let weak_view = tab_view.downgrade();
+        action.connect_activate(move |_, parameter| {
+            let terminal = weak_app
+                .upgrade()
+                .zip(weak_view.upgrade())
+                .and_then(|(app, view)| {
+                    let child = view.selected_page()?.child();
+                    app.tab(&child).map(|tab| tab.terminal.clone())
+                });
+            if let Some(terminal) = terminal {
+                run(&terminal, parameter.and_then(|v| v.get::<bool>()));
+            }
+        });
+        window.add_action(&action);
+    };
+    terminal_action(
+        "select-all",
+        Some(glib::VariantTy::BOOLEAN),
+        |terminal, select| {
+            if select.unwrap_or(true) {
+                terminal.select_all();
+            } else {
+                terminal.unselect_all();
+            }
+        },
+    );
+    terminal_action(
+        "reset",
+        Some(glib::VariantTy::BOOLEAN),
+        |terminal, clear| {
+            terminal.reset(true, clear.unwrap_or(false));
+        },
+    );
+    terminal_action("popup-menu", None, |terminal, _| {
+        terminal.activate_action("menu.popup", None).ok();
+    });
+
+    let weak = primary_menu_button.downgrade();
+    let primary_menu = gio::SimpleAction::new("primary-menu", None);
+    primary_menu.connect_activate(move |_, _| {
+        if let Some(button) = weak.upgrade() {
+            button.popup();
+        }
+    });
+    window.add_action(&primary_menu);
+
+    // The new tab button's dropdown is the "tab menu" (`new_terminal_menu_button`).
+    let weak = new_tab_button.downgrade();
+    let tab_menu = gio::SimpleAction::new("tab-menu", None);
+    tab_menu.connect_activate(move |_, _| {
+        if let Some(button) = weak.upgrade() {
+            button.popup();
+        }
+    });
+    window.add_action(&tab_menu);
+}
+
 /// Adds `win.fullscreen`, `win.unfullscreen` and `win.toggle-fullscreen`.
 /// The first two are each enabled only when it would change something, so
 /// "Leave Fullscreen" shows in the terminal menu only in fullscreen
@@ -1214,6 +1316,13 @@ impl Component for Window {
         });
         add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
         track_fullscreen(&window, fullscreen_box);
+        add_shortcut_actions(
+            &window,
+            &app,
+            &tab_view,
+            &primary_menu_button,
+            &new_tab_button,
+        );
         track_set_profile(&window, &app, &tab_view, &sender);
         add_action::<PreferencesAction>(&window, &sender, || WindowInput::ShowPreferences);
         add_action::<ShowKeyboardShortcutsAction>(&window, &sender, || {

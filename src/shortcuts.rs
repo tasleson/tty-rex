@@ -39,6 +39,7 @@ use crate::settings::{self, SettingsError};
 pub mod key {
     pub const CLOSE_OTHER_TABS: &str = "close-other-tabs";
     pub const CLOSE_TAB: &str = "close-tab";
+    pub const CLOSE_WINDOW: &str = "close-window";
     pub const COPY_CLIPBOARD: &str = "copy-clipboard";
     pub const DETACH_TAB: &str = "detach-tab";
     pub const MOVE_NEXT_TAB: &str = "move-next-tab";
@@ -48,7 +49,14 @@ pub mod key {
     pub const NEW_TAB: &str = "new-tab";
     pub const NEW_WINDOW: &str = "new-window";
     pub const PASTE_CLIPBOARD: &str = "paste-clipboard";
+    pub const POPUP_MENU: &str = "popup-menu";
     pub const PREFERENCES: &str = "preferences";
+    pub const PRIMARY_MENU: &str = "primary-menu";
+    pub const RESET: &str = "reset";
+    pub const RESET_AND_CLEAR: &str = "reset-and-clear";
+    pub const SELECT_ALL: &str = "select-all";
+    pub const SELECT_NONE: &str = "select-none";
+    pub const TAB_MENU: &str = "tab-menu";
     pub const SHOW_KEYBOARD_SHORTCUTS: &str = "show-keyboard-shortcuts";
     pub const SEARCH: &str = "search";
     pub const SET_TITLE: &str = "set-title";
@@ -62,12 +70,26 @@ pub mod key {
     pub const ZOOM_OUT: &str = "zoom-out";
 }
 
-/// Shortcut setting key and the detailed window action it activates.
+/// Shortcut setting key and the detailed action it activates, such as
+/// `win.focus-tab(3)`, which carries its target as the shortcut's arguments.
 pub const BINDINGS: &[(&str, &str)] = &[
     (key::CLOSE_OTHER_TABS, "win.close-other-tabs"),
     (key::CLOSE_TAB, "win.close-tab"),
+    // GTK's own action, as `action(window.close)` in `ptyxis-window.ui`.
+    (key::CLOSE_WINDOW, "window.close"),
     (key::COPY_CLIPBOARD, "win.copy-clipboard"),
     (key::DETACH_TAB, "win.detach-tab"),
+    ("focus-tab-1", "win.focus-tab(1)"),
+    ("focus-tab-10", "win.focus-tab(10)"),
+    ("focus-tab-2", "win.focus-tab(2)"),
+    ("focus-tab-3", "win.focus-tab(3)"),
+    ("focus-tab-4", "win.focus-tab(4)"),
+    ("focus-tab-5", "win.focus-tab(5)"),
+    ("focus-tab-6", "win.focus-tab(6)"),
+    ("focus-tab-7", "win.focus-tab(7)"),
+    ("focus-tab-8", "win.focus-tab(8)"),
+    ("focus-tab-9", "win.focus-tab(9)"),
+    ("focus-tab-last", "win.focus-tab(0)"),
     (key::MOVE_NEXT_TAB, "win.next-tab"),
     (key::MOVE_PREVIOUS_TAB, "win.previous-tab"),
     (key::MOVE_TAB_LEFT, "win.move-tab-left"),
@@ -75,10 +97,17 @@ pub const BINDINGS: &[(&str, &str)] = &[
     (key::NEW_TAB, "win.new-tab"),
     (key::NEW_WINDOW, "win.new-window"),
     (key::PASTE_CLIPBOARD, "win.paste-clipboard"),
+    (key::POPUP_MENU, "win.popup-menu"),
     (key::PREFERENCES, "win.preferences"),
+    (key::PRIMARY_MENU, "win.primary-menu"),
+    (key::RESET, "win.reset(false)"),
+    (key::RESET_AND_CLEAR, "win.reset(true)"),
     (key::SHOW_KEYBOARD_SHORTCUTS, "win.show-keyboard-shortcuts"),
     (key::SEARCH, "win.search"),
+    (key::SELECT_ALL, "win.select-all(true)"),
+    (key::SELECT_NONE, "win.select-all(false)"),
     (key::SET_TITLE, "win.set-title"),
+    (key::TAB_MENU, "win.tab-menu"),
     (key::TOGGLE_TELEMETRY, "win.toggle-telemetry"),
     (key::TAB_OVERVIEW, "win.tab-overview"),
     (key::TOGGLE_FULLSCREEN, "win.toggle-fullscreen"),
@@ -504,11 +533,17 @@ fn populate(controller: &gtk::ShortcutController, settings: &ShortcutSettings) {
         let Some(accel) = effective_accel(&value) else {
             continue;
         };
+        let Ok((name, target)) = gio::Action::parse_detailed_name(action) else {
+            glib::g_warning!("tty-rex", "Invalid action “{action}” for {key}");
+            continue;
+        };
         match gtk::ShortcutTrigger::parse_string(accel) {
-            Some(trigger) => controller.add_shortcut(gtk::Shortcut::new(
-                Some(trigger),
-                Some(gtk::NamedAction::new(action)),
-            )),
+            Some(trigger) => {
+                let shortcut =
+                    gtk::Shortcut::new(Some(trigger), Some(gtk::NamedAction::new(&name)));
+                shortcut.set_arguments(target.as_ref());
+                controller.add_shortcut(shortcut);
+            }
             None => glib::g_warning!("tty-rex", "Ignoring invalid shortcut “{accel}” for {key}"),
         }
     }
@@ -521,9 +556,10 @@ mod tests {
     use crate::window::{
         CloseOtherTabsAction, CloseTabAction, CopyAction, DetachTabAction, MoveTabLeftAction,
         MoveTabRightAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
-        PreferencesAction, PreviousTabAction, SearchAction, SetTitleAction,
-        ShowKeyboardShortcutsAction, TabOverviewAction, ToggleFullscreenAction, ToggleTelemetryAction,
-        UndoCloseTabAction, ZoomInAction, ZoomOneAction, ZoomOutAction,
+        PopupMenuAction, PreferencesAction, PreviousTabAction, PrimaryMenuAction, SearchAction,
+        SetTitleAction, ShowKeyboardShortcutsAction, TabMenuAction, TabOverviewAction,
+        ToggleFullscreenAction, ToggleTelemetryAction, UndoCloseTabAction, ZoomInAction,
+        ZoomOneAction, ZoomOutAction,
     };
     use relm4::actions::ActionName;
 
@@ -568,8 +604,20 @@ mod tests {
         let expected = [
             (key::CLOSE_OTHER_TABS, CloseOtherTabsAction::action_name()),
             (key::CLOSE_TAB, CloseTabAction::action_name()),
+            (key::CLOSE_WINDOW, "window.close".to_string()),
             (key::COPY_CLIPBOARD, CopyAction::action_name()),
             (key::DETACH_TAB, DetachTabAction::action_name()),
+            ("focus-tab-1", "win.focus-tab(1)".to_string()),
+            ("focus-tab-10", "win.focus-tab(10)".to_string()),
+            ("focus-tab-2", "win.focus-tab(2)".to_string()),
+            ("focus-tab-3", "win.focus-tab(3)".to_string()),
+            ("focus-tab-4", "win.focus-tab(4)".to_string()),
+            ("focus-tab-5", "win.focus-tab(5)".to_string()),
+            ("focus-tab-6", "win.focus-tab(6)".to_string()),
+            ("focus-tab-7", "win.focus-tab(7)".to_string()),
+            ("focus-tab-8", "win.focus-tab(8)".to_string()),
+            ("focus-tab-9", "win.focus-tab(9)".to_string()),
+            ("focus-tab-last", "win.focus-tab(0)".to_string()),
             (key::MOVE_NEXT_TAB, NextTabAction::action_name()),
             (key::MOVE_PREVIOUS_TAB, PreviousTabAction::action_name()),
             (key::MOVE_TAB_LEFT, MoveTabLeftAction::action_name()),
@@ -577,16 +625,26 @@ mod tests {
             (key::NEW_TAB, NewTabAction::action_name()),
             (key::NEW_WINDOW, NewWindowAction::action_name()),
             (key::PASTE_CLIPBOARD, PasteAction::action_name()),
+            (key::POPUP_MENU, PopupMenuAction::action_name()),
             (key::PREFERENCES, PreferencesAction::action_name()),
+            (key::PRIMARY_MENU, PrimaryMenuAction::action_name()),
+            (key::RESET, "win.reset(false)".to_string()),
+            (key::RESET_AND_CLEAR, "win.reset(true)".to_string()),
             (
                 key::SHOW_KEYBOARD_SHORTCUTS,
                 ShowKeyboardShortcutsAction::action_name(),
             ),
             (key::SEARCH, SearchAction::action_name()),
+            (key::SELECT_ALL, "win.select-all(true)".to_string()),
+            (key::SELECT_NONE, "win.select-all(false)".to_string()),
             (key::SET_TITLE, SetTitleAction::action_name()),
+            (key::TAB_MENU, TabMenuAction::action_name()),
             (key::TOGGLE_TELEMETRY, ToggleTelemetryAction::action_name()),
             (key::TAB_OVERVIEW, TabOverviewAction::action_name()),
-            (key::TOGGLE_FULLSCREEN, ToggleFullscreenAction::action_name()),
+            (
+                key::TOGGLE_FULLSCREEN,
+                ToggleFullscreenAction::action_name(),
+            ),
             (key::UNDO_CLOSE_TAB, UndoCloseTabAction::action_name()),
             (key::ZOOM_IN, ZoomInAction::action_name()),
             (key::ZOOM_ONE, ZoomOneAction::action_name()),
@@ -595,7 +653,15 @@ mod tests {
         assert_eq!(BINDINGS.len(), expected.len());
         for ((key, action), (expected_key, expected_action)) in BINDINGS.iter().zip(&expected) {
             assert_eq!(key, expected_key);
-            assert_eq!(action, expected_action, "{key}");
+            assert_eq!(*action, expected_action.as_str(), "{key}");
+        }
+    }
+
+    #[test]
+    fn detailed_actions_parse() {
+        for (key, action) in BINDINGS {
+            let (name, _) = gio::Action::parse_detailed_name(action).expect(key);
+            assert!(name.starts_with("win.") || name == "window.close", "{key}");
         }
     }
 
