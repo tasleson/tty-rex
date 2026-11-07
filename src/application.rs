@@ -24,8 +24,7 @@
 //! arrive before the object exists. Everything else about the application
 //! lives in [`crate::app`].
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::cell::{OnceCell, RefCell};
 
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
@@ -46,7 +45,7 @@ mod imp {
 
     #[derive(Default)]
     pub struct Application {
-        pub(super) launch_handler: RefCell<Option<Rc<LaunchHandler>>>,
+        pub(super) launch_handler: OnceCell<Box<LaunchHandler>>,
         /// The exported `org.freedesktop.Terminal1` object
         /// (`terminal_intent`).
         pub(super) terminal_intent: RefCell<Option<(gio::DBusConnection, gio::RegistrationId)>>,
@@ -70,10 +69,8 @@ mod imp {
             self.parent_dbus_register(connection, object_path)?;
             let application = self.obj().downgrade();
             let id = terminal_intent::export(connection, object_path, move |call| {
-                let handler = application
-                    .upgrade()
-                    .and_then(|app| app.imp().launch_handler.borrow().clone())
-                    .ok_or_else(not_ready_error)?;
+                let app = application.upgrade().ok_or_else(not_ready_error)?;
+                let handler = app.imp().launch_handler.get().ok_or_else(not_ready_error)?;
                 handler(call)
             })?;
             *self.terminal_intent.borrow_mut() = Some((connection.clone(), id));
@@ -119,11 +116,11 @@ impl Application {
     }
 
     /// Sets what handles `org.freedesktop.Terminal1` calls; until then
-    /// they fail.
+    /// they fail. Only the first call takes effect.
     pub fn set_launch_handler(
         &self,
         handler: impl Fn(LaunchCommand) -> Result<(), glib::Error> + 'static,
     ) {
-        *self.imp().launch_handler.borrow_mut() = Some(Rc::new(handler));
+        let _ = self.imp().launch_handler.set(Box::new(handler));
     }
 }

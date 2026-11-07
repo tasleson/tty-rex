@@ -26,7 +26,7 @@
 //! remote command lines, tab drag-out), so window and tab components are
 //! launched here and their controllers kept until the widgets go away.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
@@ -1180,17 +1180,15 @@ pub fn run() -> glib::ExitCode {
     // we never call `RelmApp::run()`, see the module docs.
     let _ = relm4::RelmApp::<()>::from_app(application.clone());
 
-    let state: Rc<RefCell<Option<Rc<App>>>> = Rc::default();
+    // Set once, at startup.
+    let state: Rc<OnceCell<Rc<App>>> = Rc::default();
     let failed = Rc::new(Cell::new(false));
 
     application.set_launch_handler({
         let state = Rc::clone(&state);
-        move |call| {
-            let app = state.borrow().clone();
-            match app {
-                Some(app) => app.launch_intent(call),
-                None => Err(application::not_ready_error()),
-            }
+        move |call| match state.get() {
+            Some(app) => app.launch_intent(call),
+            None => Err(application::not_ready_error()),
         }
     });
 
@@ -1206,7 +1204,9 @@ pub fn run() -> glib::ExitCode {
             }));
             relm4::set_global_css(STYLESHEET);
             match App::new(application.upcast_ref()) {
-                Ok(app) => *state.borrow_mut() = Some(app),
+                Ok(app) => {
+                    let _ = state.set(app);
+                }
                 Err(e) => {
                     eprintln!("{}: {e}", config::APP_NAME);
                     failed.set(true);
@@ -1218,19 +1218,16 @@ pub fn run() -> glib::ExitCode {
     application.connect_activate({
         let state = Rc::clone(&state);
         move |_| {
-            if let Some(app) = state.borrow().as_ref() {
+            if let Some(app) = state.get() {
                 app.activate();
             }
         }
     });
     application.connect_command_line({
         let state = Rc::clone(&state);
-        move |_, cmdline| {
-            let app = state.borrow().clone();
-            match app {
-                Some(app) => app.command_line(cmdline),
-                None => glib::ExitCode::FAILURE,
-            }
+        move |_, cmdline| match state.get() {
+            Some(app) => app.command_line(cmdline),
+            None => glib::ExitCode::FAILURE,
         }
     });
 
