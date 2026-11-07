@@ -626,6 +626,12 @@ impl AppSettings {
         ))
     }
 
+    /// Remembers the last window's grid size for `restore-window-size`
+    /// (`ptyxis_settings_set_window_size()`).
+    pub fn set_window_size(&self, (columns, rows): (u32, u32)) -> Result<(), glib::BoolError> {
+        self.settings.set(key::WINDOW_SIZE, (columns, rows))
+    }
+
     /// Initial terminal size in (columns, rows) for a new window.
     pub fn initial_grid_size(&self) -> (u32, u32) {
         let saved: (u32, u32) = self.settings.get(key::WINDOW_SIZE);

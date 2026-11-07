@@ -660,7 +660,23 @@ fn confirm_close(
 /// Asks before closing a tab that runs a program other than a shell
 /// (`ptyxis_window_close_page_cb()`). Confirming ends the program; the
 /// tab is still parked like any other closed one.
+/// Stores the selected tab's grid size in `window-size`, whether or not
+/// `restore-window-size` is on, like `ptyxis_window_save_size()`.
+fn save_size(app: &App, tab_view: &adw::TabView) {
+    let Some(size) = tab_view
+        .selected_page()
+        .and_then(|page| app.tab(&page.child()))
+        .and_then(|tab| terminal::grid_size(&tab.terminal))
+    else {
+        return;
+    };
+    if let Err(e) = app.settings().set_window_size(size) {
+        glib::g_warning!("tty-rex", "Failed to save the window size: {e}");
+    }
+}
+
 fn close_page(app: &Rc<App>, tab_view: &adw::TabView, page: &adw::TabPage) -> glib::Propagation {
+    save_size(app, tab_view);
     // A released tab belongs to a window that is going away.
     let Some(tab) = app.tab(&page.child()) else {
         return glib::Propagation::Proceed;
@@ -703,11 +719,13 @@ impl Closing {
         release_parked(&self.app, &self.parked);
     }
 
-    /// Closing the last window saves the session first. With
+    /// The window size is saved first, then closing the last window saves
+    /// the session. With
     /// `prompt-on-close` on, tabs without a running program close at once
     /// and the user is asked about the rest, which keeps the window open
     /// until they confirm.
     fn request(&self, single_terminal: bool) -> glib::Propagation {
+        save_size(&self.app, &self.tab_view);
         if !single_terminal && self.app.is_last_window(self.window.upcast_ref()) {
             self.app.save_session();
         }
