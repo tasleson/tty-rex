@@ -184,7 +184,8 @@ fn present<'de, D: serde::Deserializer<'de>>(
 }
 
 /// The labels [`classify`] reads, out of all a container carries. The
-/// field names must match the `*_LABEL` constants (checked by a test).
+/// serde renames are the real label names; `podman_ps_parsing` feeds them
+/// in as JSON.
 #[derive(Debug, Default, Deserialize)]
 struct Labels {
     #[serde(default, rename = "manager", deserialize_with = "present")]
