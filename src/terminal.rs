@@ -177,8 +177,11 @@ pub fn apply_profile(terminal: &vte::Terminal, profile: &Profile) {
 /// Applies a palette face, as `ptyxis_terminal_update_colors()` does.
 pub fn apply_palette(terminal: &vte::Terminal, palette: &Palette, dark: bool) {
     let face = palette.face(dark);
-    let indexed: Vec<_> = face.indexed.iter().collect();
-    terminal.set_colors(Some(&face.foreground), Some(&face.background), &indexed);
+    terminal.set_colors(
+        Some(&face.foreground),
+        Some(&face.background),
+        &face.indexed.each_ref(),
+    );
 
     match face.cursor_background {
         Some(cursor_bg) if cursor_bg.alpha() > 0.0 => {
