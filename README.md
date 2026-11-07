@@ -28,6 +28,14 @@ tty-rex understands `--tab`, `--new-window`, `--tab-with-profile`,
 `-s`/`--standalone`, `--preferences` and `--import-palette FILE` with the
 same meaning as in Ptyxis; `cargo run -- --help` lists them.
 
+Like Ptyxis, tty-rex implements the `org.freedesktop.Terminal1` D-Bus
+interface, which file managers use for "Open in Terminal" and
+`xdg-terminal-exec` uses to run programs. Each call opens a new window
+with a tab per command, taking the directory, environment, title and
+"keep the terminal open" request from the call and the caller's desktop
+entry. The desktop file announces it with `Implements=`, so it is only
+found once tty-rex is installed as described below.
+
 Containers work as in Ptyxis, but without the agent: tty-rex lists
 podman's containers itself (`podman ps`), classifying toolbox, distrobox
 and apx ones by their labels, and runs shells in them through

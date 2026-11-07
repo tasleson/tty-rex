@@ -35,6 +35,7 @@
 //! `io.github.tasleson.TtyRex` so the two never hand launches to each other.
 
 pub mod app;
+pub mod application;
 pub mod choices;
 pub mod cli;
 pub mod close_dialog;
@@ -60,6 +61,7 @@ pub mod tab_notify;
 pub mod telemetry;
 pub mod telemetry_bar;
 pub mod terminal;
+pub mod terminal_intent;
 pub mod theme_selector;
 pub mod title_dialog;
 pub mod window;

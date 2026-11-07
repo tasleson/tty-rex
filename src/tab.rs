@@ -458,6 +458,9 @@ pub struct TabInit {
     /// Directory of the tab this one was opened from.
     pub previous_cwd_uri: Option<String>,
     pub title_prefix: Option<String>,
+    /// Shows only the title prefix, whatever the program sets
+    /// (`ptyxis_tab_set_ignore_osc_title()`).
+    pub ignore_osc_title: bool,
     /// Title shown until the program sets one, e.g. the title the tab had
     /// when the session was saved (`ptyxis_tab_set_initial_title()`).
     pub initial_title: Option<String>,
@@ -1065,10 +1068,8 @@ impl Component for Tab {
             keep_terminal_open: init.keep_terminal_open,
             initial_cwd_uri: init.initial_cwd_uri,
             previous_cwd_uri: init.previous_cwd_uri,
-            ignore_osc_title: should_ignore_osc_title(
-                ignore_osc_title_setting,
-                title_prefix.as_deref(),
-            ),
+            ignore_osc_title: init.ignore_osc_title
+                || should_ignore_osc_title(ignore_osc_title_setting, title_prefix.as_deref()),
             ignore_osc_title_setting,
             title_prefix,
             initial_title: init.initial_title,

@@ -36,6 +36,7 @@ use relm4::actions::{ActionName, RelmAction};
 use relm4::prelude::*;
 use vte::prelude::*;
 
+use crate::application::{self, Application};
 use crate::cli::{self, CommandLineAction, CommandLineOptions, WindowTarget};
 use crate::config;
 use crate::container::{self, Container, Containers};
@@ -48,6 +49,7 @@ use crate::spawn::{self, HostSpawner, Spawner};
 use crate::tab::{Tab, TabInit, TabInput};
 use crate::telemetry::Pid;
 use crate::terminal::{self, ZoomLevel};
+use crate::terminal_intent::{self, LaunchCommand};
 use crate::window::{
     NewTabInContainerAction, NewTabWithProfileAction, Window, WindowInit, WindowInput,
 };
@@ -82,6 +84,8 @@ pub struct TabRequest {
     pub initial_cwd_uri: Option<String>,
     pub previous_cwd_uri: Option<String>,
     pub title_prefix: Option<String>,
+    /// Ignores the titles the program sets, as a `title_prefix` also does.
+    pub ignore_osc_title: bool,
     pub zoom: ZoomLevel,
     pub grid_size: Option<(u32, u32)>,
     /// Container to run in instead of the profile's default one.
@@ -446,6 +450,7 @@ impl App {
                 initial_cwd_uri: request.initial_cwd_uri,
                 previous_cwd_uri: request.previous_cwd_uri,
                 title_prefix: request.title_prefix,
+                ignore_osc_title: request.ignore_osc_title,
                 initial_title: request.initial_title.clone(),
                 zoom: Rc::clone(&zoom),
                 color: Rc::clone(&color),
@@ -804,6 +809,21 @@ impl App {
         }
     }
 
+    /// Opens a window for an `org.freedesktop.Terminal1` call
+    /// (`ptyxis_terminal_intent_handle_launch_command()`).
+    fn launch_intent(self: &Rc<Self>, call: LaunchCommand) -> Result<(), glib::Error> {
+        let home = glib::home_dir();
+        let entry = terminal_intent::read_desktop_entry(call.desktop_entry.as_deref(), &home)?;
+        let window = self.new_window();
+        window
+            .sender
+            .emit(WindowInput::AddTabs(terminal_intent::tab_requests(
+                call, entry,
+            )));
+        window.window.present();
+        Ok(())
+    }
+
     fn activate(self: &Rc<Self>) {
         match self.current_window() {
             Some(window) => window.window.present(),
@@ -986,11 +1006,7 @@ pub fn run() -> glib::ExitCode {
     }
 
     register_resources();
-    let application = adw::Application::builder()
-        .application_id(config::APP_ID)
-        .flags(flags)
-        .resource_base_path(config::RESOURCE_BASE_PATH)
-        .build();
+    let application = Application::new(config::APP_ID, flags, config::RESOURCE_BASE_PATH);
     cli::register_options(&application);
     // Registers the application with relm4 (for `relm4::main_application()`);
     // we never call `RelmApp::run()`, see the module docs.
@@ -998,6 +1014,17 @@ pub fn run() -> glib::ExitCode {
 
     let state: Rc<RefCell<Option<Rc<App>>>> = Rc::default();
     let failed = Rc::new(Cell::new(false));
+
+    application.set_launch_handler({
+        let state = Rc::clone(&state);
+        move |call| {
+            let app = state.borrow().clone();
+            match app {
+                Some(app) => app.launch_intent(call),
+                None => Err(application::not_ready_error()),
+            }
+        }
+    });
 
     application.connect_startup({
         let state = Rc::clone(&state);
@@ -1010,7 +1037,7 @@ pub fn run() -> glib::ExitCode {
                     .is_some_and(|theme| theme.has_icon(name))
             }));
             relm4::set_global_css(STYLESHEET);
-            match App::new(application) {
+            match App::new(application.upcast_ref()) {
                 Ok(app) => *state.borrow_mut() = Some(app),
                 Err(e) => {
                     eprintln!("{}: {e}", config::APP_NAME);

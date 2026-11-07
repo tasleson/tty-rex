@@ -14,6 +14,8 @@ relm4 = { version = "0.11", features = ["libadwaita", "gnome_46"] }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
 vte = { package = "vte4", version = "0.10", features = ["v0_78"] }
+# GDesktopAppInfo, for the desktop entry of org.freedesktop.Terminal1 calls.
+gio-unix = "0.22"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

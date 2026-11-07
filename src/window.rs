@@ -141,6 +141,8 @@ pub struct WindowInit {
 pub enum WindowInput {
     /// Adds a fully specified tab (used by the command line).
     AddTab(Box<TabRequest>),
+    /// Adds tabs in order, selecting the first (`org.freedesktop.Terminal1`).
+    AddTabs(Vec<TabRequest>),
     /// Adds a tab inheriting directory, zoom and size from the active tab;
     /// `None` keeps the active tab's profile.
     NewTab {
@@ -283,6 +285,22 @@ impl Window {
             if self.tab_view.n_pages() == 0 {
                 self.window.destroy();
             }
+        }
+    }
+
+    /// Adds a tab per request, selecting the first one; like
+    /// `ptyxis_terminal_intent_handle_launch_command()`, the others are
+    /// placed relative to it by `new-tab-position` without being selected.
+    fn add_tabs(&mut self, requests: Vec<TabRequest>) {
+        for (i, request) in requests.into_iter().enumerate() {
+            match insert_page(&self.app, &self.tab_view, request) {
+                Ok(page) if i == 0 => self.tab_view.set_selected_page(&page),
+                Ok(_) => {}
+                Err(e) => glib::g_critical!("tty-rex", "Failed to create tab: {e}"),
+            }
+        }
+        if self.tab_view.n_pages() == 0 {
+            self.window.destroy();
         }
     }
 
@@ -472,15 +490,25 @@ fn current_container(app: &App, tab: &TabRef) -> Option<Container> {
 fn insert_tab(
     app: &App,
     tab_view: &adw::TabView,
+    request: TabRequest,
+) -> Result<adw::TabPage, crate::settings::SettingsError> {
+    let page = insert_page(app, tab_view, request)?;
+    tab_view.set_selected_page(&page);
+    Ok(page)
+}
+
+/// Creates a tab for `request` in `tab_view` without selecting it
+/// (`ptyxis_window_add_tab()`).
+fn insert_page(
+    app: &App,
+    tab_view: &adw::TabView,
     mut request: TabRequest,
 ) -> Result<adw::TabPage, crate::settings::SettingsError> {
     if request.grid_size.is_none() && tab_view.n_pages() == 0 {
         request.grid_size = Some(app.settings().initial_grid_size());
     }
     let child = app.create_tab(request)?;
-    let page = tab_view.insert(&child, new_tab_position(app, tab_view));
-    tab_view.set_selected_page(&page);
-    Ok(page)
+    Ok(tab_view.insert(&child, new_tab_position(app, tab_view)))
 }
 
 /// Where a new or reopened tab goes, after the selected one or last
@@ -1154,6 +1182,7 @@ impl Component for Window {
         use crate::tab::TabInput;
         match message {
             WindowInput::AddTab(request) => self.add_tab(*request),
+            WindowInput::AddTabs(requests) => self.add_tabs(requests),
             WindowInput::NewTab {
                 profile_uuid,
                 container_id,
