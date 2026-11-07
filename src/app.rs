@@ -53,7 +53,7 @@ use crate::telemetry::Pid;
 use crate::terminal::{self, ZoomLevel};
 use crate::terminal_intent::{self, LaunchCommand};
 use crate::window::{
-    NewTabInContainerAction, NewTabWithProfileAction, Window, WindowInit, WindowInput,
+    NewTabInContainerAction, NewTabWithProfileAction, Window, WindowInit, WindowInput, WindowKind,
 };
 
 /// Section titles of the "new tab" menu once it lists containers.
@@ -561,14 +561,14 @@ impl App {
     }
 
     pub fn new_window(self: &Rc<Self>) -> WindowRef {
-        self.launch_window(false)
+        self.launch_window(WindowKind::Tabs)
     }
 
-    fn launch_window(self: &Rc<Self>, single_terminal: bool) -> WindowRef {
+    fn launch_window(self: &Rc<Self>, kind: WindowKind) -> WindowRef {
         let controller = Window::builder()
             .launch(WindowInit {
                 app: Rc::clone(self),
-                single_terminal,
+                kind,
             })
             .detach();
         let tab_view = controller.model().tab_view().clone();
@@ -946,15 +946,16 @@ impl App {
                     WindowTarget::Current => self.current_window(),
                     WindowTarget::New => None,
                 };
-                // Like ptyxis_window_new_for_command(), a standalone -x
-                // window (e.g. a Terminal=true desktop file) never saves
-                // the session, which would replace the user's windows.
-                let single_terminal = standalone
-                    && request.command.is_some()
+                // Like ptyxis_window_new_for_command(), a plain -x window
+                // is for its command alone; in a standalone instance (e.g.
+                // a Terminal=true desktop file) it also never saves the
+                // session, which would replace the user's windows.
+                let plain_execute = request.command.is_some()
                     && !options.tab
                     && !options.new_window
                     && request.profile_uuid.is_none();
-                let window = window.unwrap_or_else(|| self.launch_window(single_terminal));
+                let kind = WindowKind::for_command_line(plain_execute, standalone);
+                let window = window.unwrap_or_else(|| self.launch_window(kind));
                 window.sender.emit(WindowInput::AddTab(Box::new(request)));
                 if applies_window_state {
                     self.maybe_maximize_or_fullscreen(&window.window);

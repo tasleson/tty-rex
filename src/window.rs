@@ -146,9 +146,54 @@ relm4::new_stateless_action!(
 
 pub struct WindowInit {
     pub app: Rc<App>,
-    /// A standalone instance's window for one command, which stays out of
-    /// the saved session (`single_terminal_mode`).
-    pub single_terminal: bool,
+    pub kind: WindowKind,
+}
+
+/// What a window was opened for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowKind {
+    /// An ordinary window holding any number of tabs.
+    #[default]
+    Tabs,
+    /// A window for the one command of a plain `-x` command line
+    /// (`ptyxis_window_new_for_command()`): the actions that create, move or
+    /// switch tabs are disabled and the tab bar, new tab button and overview
+    /// button hidden.
+    Command,
+    /// A command window of a standalone instance (`single_terminal_mode`),
+    /// which also stays out of the saved session, e.g. one opened for a
+    /// `Terminal=true` desktop file, and never shows its tab bar.
+    SingleTerminal,
+}
+
+impl WindowKind {
+    /// The kind of window `ptyxis_application_command_line()` opens: only
+    /// its plain `-x` branch, without `--tab`, `--new-window` or
+    /// `--tab-with-profile`, makes a command window, which is in
+    /// `single_terminal_mode` when the instance is standalone.
+    pub fn for_command_line(plain_execute: bool, standalone: bool) -> Self {
+        match (plain_execute, standalone) {
+            (false, _) => Self::Tabs,
+            (true, false) => Self::Command,
+            (true, true) => Self::SingleTerminal,
+        }
+    }
+
+    /// Whether the tab actions are enabled and their buttons shown.
+    fn has_tab_actions(self) -> bool {
+        self == Self::Tabs
+    }
+
+    /// Whether closing the window may save the session.
+    fn saves_session(self) -> bool {
+        self != Self::SingleTerminal
+    }
+
+    /// Whether the tab bar shows with `n_pages` tabs
+    /// (`update_visible_and_maybe_close()`).
+    fn shows_tab_bar(self, n_pages: i32) -> bool {
+        self != Self::SingleTerminal && n_pages > 1
+    }
 }
 
 #[derive(Debug)]
@@ -242,7 +287,7 @@ pub struct Window {
     /// must not save the session again (`in_close_request`). It is cleared
     /// if the user cancels the close.
     in_close_request: Rc<Cell<bool>>,
-    single_terminal: bool,
+    kind: WindowKind,
     /// Closed tabs that `win.undo-close-tab` can still reopen; shared with
     /// the close-request handler, which releases them with the window.
     parked: Rc<RefCell<ParkingLot<gtk::Widget>>>,
@@ -361,7 +406,7 @@ impl Window {
     /// already (`update_visible_and_maybe_close()`).
     fn close_if_empty(&self) {
         if self.tab_view.n_pages() == 0 && !self.tab_view.is_transferring_page() {
-            if !self.in_close_request.get() && !self.single_terminal {
+            if !self.in_close_request.get() && self.kind.saves_session() {
                 self.app.save_session();
             }
             release_parked(&self.app, &self.parked);
@@ -370,12 +415,12 @@ impl Window {
     }
 
     /// Keeps a closed tab alive for a few seconds so it can be reopened
-    /// (`ptyxis_window_close_page_cb()`). A standalone `-x` window has no
+    /// (`ptyxis_window_close_page_cb()`). A command window has no
     /// `win.undo-close-tab`, and tabs of a window that is closing as a whole
     /// were released already. Tabs closed while the window asks whether to
     /// close the rest are parked, so they come back if the user cancels.
     fn park_tab(&self, child: gtk::Widget) {
-        if self.single_terminal || self.app.tab(&child).is_none() {
+        if !self.kind.has_tab_actions() || self.app.tab(&child).is_none() {
             self.app.remove_tab(&child);
             return;
         }
@@ -723,9 +768,9 @@ impl Closing {
     /// the session. With `prompt-on-close` on, tabs without a running
     /// program close at once and the user is asked about the rest, which
     /// keeps the window open until they confirm.
-    fn request(&self, single_terminal: bool) -> glib::Propagation {
+    fn request(&self, kind: WindowKind) -> glib::Propagation {
         save_size(&self.app, &self.tab_view);
-        if !single_terminal && self.app.is_last_window(self.window.upcast_ref()) {
+        if kind.saves_session() && self.app.is_last_window(self.window.upcast_ref()) {
             self.app.save_session();
         }
         if !self.app.settings().prompt_on_close() {
@@ -970,14 +1015,16 @@ fn track_set_profile(
 }
 
 /// Keeps `win.pin-tab` / `win.unpin-tab` in line with the selected page
-/// (`ptyxis_window_selected_page_notify_pinned_cb()`).
+/// (`ptyxis_window_selected_page_notify_pinned_cb()`), or both disabled
+/// unless `enabled`.
 fn track_pinned(
     tab_view: &adw::TabView,
     pin: gio::SimpleAction,
     unpin: gio::SimpleAction,
+    enabled: bool,
 ) -> glib::SignalGroup {
     let update = move |page: Option<&adw::TabPage>| {
-        let pinned = page.map(adw::TabPage::is_pinned);
+        let pinned = page.filter(|_| enabled).map(adw::TabPage::is_pinned);
         pin.set_enabled(pinned == Some(false));
         unpin.set_enabled(pinned == Some(true));
     };
@@ -1109,7 +1156,7 @@ impl Component for Window {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let app = init.app;
-        let single_terminal = init.single_terminal;
+        let kind = init.kind;
         if config::APP_ID.ends_with(".Devel") {
             window.add_css_class(DEVEL_STYLE_CLASS);
         }
@@ -1121,9 +1168,12 @@ impl Component for Window {
         tab_view.set_shortcuts(adw::TabViewShortcuts::empty());
         tab_view.set_menu_model(Some(&build_tab_menu()));
 
+        // A command window starts without its tab bar and shows it only if
+        // tabs are dragged in, never in a standalone instance.
         let tab_bar = adw::TabBar::builder()
             .view(&tab_view)
-            .autohide(true)
+            .autohide(kind.has_tab_actions())
+            .visible(kind.has_tab_actions())
             .build();
 
         let window_title = adw::WindowTitle::new(config::APP_NAME, "");
@@ -1138,6 +1188,7 @@ impl Component for Window {
             .action_name(NewTabAction::action_name())
             .focus_on_click(false)
             .build();
+        new_tab_button.set_visible(kind.has_tab_actions());
         header.pack_start(&new_tab_button);
         let primary_menu_button = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
@@ -1150,6 +1201,7 @@ impl Component for Window {
             .icon_name("view-grid-symbolic")
             .tooltip_text("Show Open Tabs")
             .focus_on_click(false)
+            .visible(kind.has_tab_actions())
             .build();
         header.pack_end(&tab_overview_button);
         // The window buttons give way to "Leave Fullscreen" in fullscreen.
@@ -1264,7 +1316,7 @@ impl Component for Window {
             .sync_create()
             .build();
 
-        add_action::<NewTabAction>(&window, &sender, || WindowInput::NewTab {
+        let new_tab = add_action::<NewTabAction>(&window, &sender, || WindowInput::NewTab {
             profile_uuid: None,
             container_id: None,
         });
@@ -1286,22 +1338,24 @@ impl Component for Window {
                 })
             });
         window.add_action(new_tab_in_container.gio_action());
-        add_action::<NewWindowAction>(&window, &sender, || WindowInput::NewWindow);
+        let new_window = add_action::<NewWindowAction>(&window, &sender, || WindowInput::NewWindow);
         add_action::<CloseTabAction>(&window, &sender, || WindowInput::CloseTab);
-        add_action::<CloseOtherTabsAction>(&window, &sender, || WindowInput::CloseOtherTabs);
-        // A standalone -x window ends with its only tab, so there is
-        // nothing to reopen (`single_terminal_mode`).
-        add_action::<UndoCloseTabAction>(&window, &sender, || WindowInput::UndoCloseTab)
-            .set_enabled(!single_terminal);
-        add_action::<MoveTabLeftAction>(&window, &sender, || WindowInput::MoveTabLeft);
-        add_action::<MoveTabRightAction>(&window, &sender, || WindowInput::MoveTabRight);
-        add_action::<DetachTabAction>(&window, &sender, || WindowInput::DetachTab);
+        let close_others =
+            add_action::<CloseOtherTabsAction>(&window, &sender, || WindowInput::CloseOtherTabs);
+        let undo_close =
+            add_action::<UndoCloseTabAction>(&window, &sender, || WindowInput::UndoCloseTab);
+        let move_left =
+            add_action::<MoveTabLeftAction>(&window, &sender, || WindowInput::MoveTabLeft);
+        let move_right =
+            add_action::<MoveTabRightAction>(&window, &sender, || WindowInput::MoveTabRight);
+        let detach = add_action::<DetachTabAction>(&window, &sender, || WindowInput::DetachTab);
         let pin = add_action::<PinTabAction>(&window, &sender, || WindowInput::SetTabPinned(true));
         let unpin =
             add_action::<UnpinTabAction>(&window, &sender, || WindowInput::SetTabPinned(false));
-        let pinned_signals = track_pinned(&tab_view, pin, unpin);
-        add_action::<NextTabAction>(&window, &sender, || WindowInput::NextTab);
-        add_action::<PreviousTabAction>(&window, &sender, || WindowInput::PreviousTab);
+        let pinned_signals = track_pinned(&tab_view, pin, unpin, kind.has_tab_actions());
+        let next = add_action::<NextTabAction>(&window, &sender, || WindowInput::NextTab);
+        let previous =
+            add_action::<PreviousTabAction>(&window, &sender, || WindowInput::PreviousTab);
         let copy_action = add_action::<CopyAction>(&window, &sender, || WindowInput::Copy);
         copy_action.set_enabled(false);
         add_action::<PasteAction>(&window, &sender, || WindowInput::Paste);
@@ -1338,7 +1392,29 @@ impl Component for Window {
                 .is_some_and(|tab| tab.color.get().is_some());
             reset_color.set_enabled(has_color);
         });
-        add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
+        let overview =
+            add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
+        // A command window is about its one command, so it offers no way to
+        // add, reorder or switch tabs (`ptyxis_window_new_for_command()`);
+        // `win.pin-tab` and `win.unpin-tab` stay disabled in track_pinned().
+        if !kind.has_tab_actions() {
+            for action in [
+                &new_tab,
+                &new_window,
+                new_tab_with_profile.gio_action(),
+                new_tab_in_container.gio_action(),
+                &overview,
+                &move_left,
+                &move_right,
+                &close_others,
+                &detach,
+                &next,
+                &previous,
+                &undo_close,
+            ] {
+                action.set_enabled(false);
+            }
+        }
         track_fullscreen(&window, fullscreen_box.clone());
         add_shortcut_actions(
             &window,
@@ -1374,15 +1450,23 @@ impl Component for Window {
                 input.emit(WindowInput::TransferFinished);
             }
         });
-        // The tab bar hides itself while there is a single tab.
+        // The tab bar of an ordinary window hides itself while there is a
+        // single tab; a command window's is shown and hidden here.
         let weak_window = window.downgrade();
+        let weak_tab_bar = tab_bar.downgrade();
         tab_view.connect_n_pages_notify(move |tab_view| {
+            let visible = kind.shows_tab_bar(tab_view.n_pages());
             if let Some(window) = weak_window.upgrade() {
-                if tab_view.n_pages() > 1 {
+                if visible {
                     window.add_css_class(HAS_TAB_BAR_CLASS);
                 } else {
                     window.remove_css_class(HAS_TAB_BAR_CLASS);
                 }
+            }
+            if !kind.has_tab_actions()
+                && let Some(tab_bar) = weak_tab_bar.upgrade()
+            {
+                tab_bar.set_visible(visible);
             }
         });
         let weak_app = Rc::downgrade(&app);
@@ -1421,7 +1505,7 @@ impl Component for Window {
                 in_close_request: Rc::clone(&closing),
                 parked: Rc::clone(&closing_parked),
             }
-            .request(single_terminal)
+            .request(kind)
         });
 
         // Like ptyxis_window_notify_is_active_cb().
@@ -1452,7 +1536,7 @@ impl Component for Window {
             tab_overview,
             overview_close_serial: 0,
             in_close_request,
-            single_terminal,
+            kind,
             parked,
             fullscreen_box,
         };
@@ -1585,6 +1669,44 @@ impl Component for Window {
                 }
             }
             WindowInput::TransferFinished => self.close_if_empty(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_kind_for_command_line() {
+        use WindowKind::*;
+        for (plain_execute, standalone, expected) in [
+            (false, false, Tabs),
+            (false, true, Tabs),
+            (true, false, Command),
+            (true, true, SingleTerminal),
+        ] {
+            assert_eq!(
+                WindowKind::for_command_line(plain_execute, standalone),
+                expected,
+                "plain_execute={plain_execute} standalone={standalone}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_kind_behavior() {
+        use WindowKind::*;
+        // (kind, tab actions, saves session, tab bar with 1 / 2 tabs)
+        for (kind, actions, saves, bar1, bar2) in [
+            (Tabs, true, true, false, true),
+            (Command, false, true, false, true),
+            (SingleTerminal, false, false, false, false),
+        ] {
+            assert_eq!(kind.has_tab_actions(), actions, "{kind:?}");
+            assert_eq!(kind.saves_session(), saves, "{kind:?}");
+            assert_eq!(kind.shows_tab_bar(1), bar1, "{kind:?}");
+            assert_eq!(kind.shows_tab_bar(2), bar2, "{kind:?}");
         }
     }
 }
