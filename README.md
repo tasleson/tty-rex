@@ -1,3 +1,5 @@
+<img width="836" height="470" alt="tty-rex" src="https://github.com/user-attachments/assets/f22b241d-031f-410c-81dc-661a81774858" />
+
 # tty-rex
 
 tty-rex is an experimental Rust port of the
