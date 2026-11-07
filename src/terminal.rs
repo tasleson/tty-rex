@@ -267,6 +267,20 @@ pub fn connect_shell_precmd(
     terminal.connect_termprop_changed(Some(TERMPROP_SHELL_PRECMD), move |terminal, _| f(terminal))
 }
 
+/// Connects to `commit` without looking at the text. VTE commits whatever
+/// it sends the child, which for a dropped file with a non-UTF-8 name is
+/// not UTF-8, and vte4-rs's `connect_commit()` hands that text over as a
+/// `&str` (asserting it is valid in debug builds, so the callback aborts).
+pub fn connect_commit_bytes(
+    terminal: &vte::Terminal,
+    f: impl Fn() + 'static,
+) -> glib::SignalHandlerId {
+    terminal.connect_local("commit", false, move |_| {
+        f();
+        None
+    })
+}
+
 /// The terminal's grid size in (columns, rows), as Ptyxis reads it with
 /// `vte_terminal_get_column_count()` and `vte_terminal_get_row_count()`.
 pub fn grid_size(terminal: &vte::Terminal) -> Option<(u32, u32)> {

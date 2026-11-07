@@ -519,9 +519,8 @@ impl Window {
         // Typing hides the bars a tab switch revealed
         // (`ptyxis_window_active_tab_commit_cb()`).
         let fullscreen_box = self.fullscreen_box.clone();
-        let commit_id = tab
-            .terminal
-            .connect_commit(move |_, _, _| fullscreen_box.unreveal());
+        let commit_id =
+            terminal::connect_commit_bytes(&tab.terminal, move || fullscreen_box.unreveal());
         self.terminal_handlers = Some((
             tab.terminal.clone(),
             vec![cwd_id, selection_id, bell_id, commit_id],

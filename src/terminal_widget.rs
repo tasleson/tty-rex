@@ -135,20 +135,35 @@ fn uri_list_entry(line: &str) -> Option<&str> {
 }
 
 /// The text `ptyxis_terminal_drop_file_list()` pastes: each item shell
-/// quoted and followed by a space.
-fn quoted_paste_text<I>(items: I) -> String
+/// quoted and followed by a space. It is bytes, not a string, because a
+/// local path need not be UTF-8 and the shell must get it unchanged.
+fn quoted_paste_text<I>(items: I) -> Vec<u8>
 where
     I: IntoIterator,
     I::Item: AsRef<OsStr>,
 {
-    items
-        .into_iter()
-        .map(|item| {
-            let mut quoted = glib::shell_quote(item).to_string_lossy().into_owned();
-            quoted.push(' ');
-            quoted
-        })
-        .collect()
+    let mut text = Vec::new();
+    for item in items {
+        text.extend_from_slice(glib::shell_quote(item).as_bytes());
+        text.push(b' ');
+    }
+    text
+}
+
+/// `vte_terminal_paste_text()` on raw bytes, as the C code calls it with
+/// whatever `g_shell_quote()` returned. vte4-rs only binds it for `&str`,
+/// which would turn a non-UTF-8 path into one that does not exist.
+fn paste_bytes(terminal: &vte::Terminal, text: Vec<u8>) {
+    use glib::translate::ToGlibPtr;
+    match std::ffi::CString::new(text) {
+        // SAFETY: `terminal` is a live `VteTerminal` and `text` a
+        // NUL-terminated buffer that outlives the call, which copies it.
+        Ok(text) => unsafe {
+            vte::ffi::vte_terminal_paste_text(terminal.to_glib_none().0, text.as_ptr());
+        },
+        // Paths and URIs cannot hold a NUL, so this is not expected.
+        Err(error) => glib::g_debug!("tty-rex", "Not pasting dropped text: {error}"),
+    }
 }
 
 /// `ptyxis_terminal_get_portal_host_path()`: the real path behind a
@@ -587,7 +602,7 @@ mod imp {
     fn paste_files(terminal: &super::TerminalWidget, files: &[gio::File]) {
         let text = quoted_paste_text(files.iter().map(file_paste_item));
         if !text.is_empty() {
-            terminal.paste_text(&text);
+            paste_bytes(terminal.upcast_ref(), text);
         }
     }
 
@@ -922,8 +937,14 @@ mod tests {
                 "'https://example.com/?q=1' ",
             ),
         ] {
-            assert_eq!(quoted_paste_text(&items), expected, "{items:?}");
+            assert_eq!(quoted_paste_text(&items), expected.as_bytes(), "{items:?}");
         }
+    }
+
+    #[test]
+    fn paste_text_keeps_non_utf8_paths() {
+        let path = OsStr::from_bytes(b"/tmp/lat\xe9n\n$(x)");
+        assert_eq!(quoted_paste_text([path]), b"'/tmp/lat\xe9n\n$(x)' ");
     }
 
     #[test]

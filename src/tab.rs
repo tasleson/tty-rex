@@ -1142,7 +1142,8 @@ impl Component for Tab {
         terminal::connect_shell_precmd(&terminal, move |_| input.emit(TabInput::ShellPrecmd));
         let has_pressed_key = Rc::new(Cell::new(false));
         let pressed = Rc::clone(&has_pressed_key);
-        terminal.connect_commit(move |_, _, _| pressed.set(true));
+        // Not `connect_commit()`: see `terminal::connect_commit_bytes()`.
+        terminal::connect_commit_bytes(&terminal, move || pressed.set(true));
 
         let leader_monitor = LeaderMonitor::new(sender.input_sender().clone());
         let monitor = Rc::clone(&leader_monitor);
