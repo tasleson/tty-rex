@@ -146,16 +146,21 @@ impl Foreground {
 /// Turns the raw contents of `/proc/PID/cmdline` into a printable line
 /// like `get_cmdline_for_pid()`: separators and control characters become
 /// spaces and invalid UTF-8 is replaced. Empty contents give `None`.
-pub fn cmdline_from_bytes(bytes: &[u8]) -> Option<String> {
-    let bytes = &bytes[..bytes.len().min(CMDLINE_MAX)];
+pub fn cmdline_from_bytes(mut bytes: Vec<u8>) -> Option<String> {
+    bytes.truncate(CMDLINE_MAX);
     if bytes.is_empty() {
         return None;
     }
-    let spaced: Vec<u8> = bytes
-        .iter()
-        .map(|&b| if b.is_ascii_control() { b' ' } else { b })
-        .collect();
-    Some(String::from_utf8_lossy(&spaced).into_owned())
+    for byte in &mut bytes {
+        if byte.is_ascii_control() {
+            *byte = b' ';
+        }
+    }
+    // Valid UTF-8, the usual case, becomes the string without a copy.
+    Some(
+        String::from_utf8(bytes)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    )
 }
 
 fn read_cmdline(proc_dir: &Path, pid: i32) -> Option<String> {
@@ -166,7 +171,7 @@ fn read_cmdline(proc_dir: &Path, pid: i32) -> Option<String> {
         .take(CMDLINE_MAX as u64)
         .read_to_end(&mut buf)
         .ok()?;
-    cmdline_from_bytes(&buf)
+    cmdline_from_bytes(buf)
 }
 
 /// What runs in the foreground of the terminal on `pty`, unless it is
@@ -345,9 +350,13 @@ mod tests {
             (b"bad\xff\0", Some("bad\u{fffd} ")),
         ];
         for (bytes, expected) in cases {
-            assert_eq!(cmdline_from_bytes(bytes).as_deref(), expected, "{bytes:?}");
+            assert_eq!(
+                cmdline_from_bytes(bytes.to_vec()).as_deref(),
+                expected,
+                "{bytes:?}"
+            );
         }
-        assert_eq!(cmdline_from_bytes(&long).unwrap().len(), CMDLINE_MAX);
+        assert_eq!(cmdline_from_bytes(long).unwrap().len(), CMDLINE_MAX);
     }
 
     #[test]

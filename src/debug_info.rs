@@ -256,9 +256,12 @@ pub fn os_name_from_release(contents: &str) -> Option<String> {
 /// invalid UTF-8 is replaced rather than dropping the whole file, as the
 /// About dialog can only show text.
 pub fn read_text(path: &Path) -> Option<String> {
-    std::fs::read(path)
-        .ok()
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    let bytes = std::fs::read(path).ok()?;
+    // Valid UTF-8, the usual case, becomes the string without a copy.
+    Some(
+        String::from_utf8(bytes)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    )
 }
 
 /// The files describing the system: the `vte.sh` and `os-release` of the
