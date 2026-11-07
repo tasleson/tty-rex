@@ -46,6 +46,7 @@ pub mod inspector;
 pub mod leader;
 pub mod palette;
 pub mod palette_preview;
+pub mod parking_lot;
 pub mod preferences;
 pub mod profile;
 pub mod proxy;
