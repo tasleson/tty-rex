@@ -25,6 +25,7 @@
 //! factory owned by one window cannot follow. The window only inserts
 //! pages and looks tabs up by their root widget.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -210,6 +211,9 @@ pub struct Window {
     /// Identifies the latest overview close, so reopening the overview
     /// before a close finishes cancels its delayed refocus.
     overview_close_serial: u32,
+    /// Set once the window is closing as a whole, when its tabs going away
+    /// must not save the session again (`in_close_request`).
+    in_close_request: Rc<Cell<bool>>,
 }
 
 /// Registers a parameterless action that forwards `message` to the window
@@ -302,8 +306,14 @@ impl Window {
         });
     }
 
+    /// Closes the window once its last tab is gone, saving the session
+    /// first unless the window is being closed as a whole, which saved it
+    /// already (`update_visible_and_maybe_close()`).
     fn close_if_empty(&self) {
         if self.tab_view.n_pages() == 0 && !self.tab_view.is_transferring_page() {
+            if !self.in_close_request.get() {
+                self.app.save_session();
+            }
             self.window.destroy();
         }
     }
@@ -862,11 +872,19 @@ impl Component for Window {
         });
 
         // Tabs must be released while the tab view still has its pages, so
-        // this runs synchronously rather than through a message.
+        // this runs synchronously rather than through a message. Closing the
+        // last window saves the session first, like
+        // ptyxis_window_close_request().
         let weak_app = Rc::downgrade(&app);
         let weak_tab_view = tab_view.downgrade();
-        window.connect_close_request(move |_| {
+        let in_close_request = Rc::new(Cell::new(false));
+        let closing = Rc::clone(&in_close_request);
+        window.connect_close_request(move |window| {
+            closing.set(true);
             if let (Some(app), Some(tab_view)) = (weak_app.upgrade(), weak_tab_view.upgrade()) {
+                if app.is_last_window(window.upcast_ref()) {
+                    app.save_session();
+                }
                 release_tabs(&app, &tab_view);
             }
             glib::Propagation::Proceed
@@ -892,6 +910,7 @@ impl Component for Window {
             visual_bell_serial: 0,
             tab_overview,
             overview_close_serial: 0,
+            in_close_request,
         };
         ComponentParts { model, widgets: () }
     }

@@ -34,17 +34,19 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use relm4::actions::{ActionName, RelmAction};
 use relm4::prelude::*;
+use vte::prelude::*;
 
 use crate::cli::{self, CommandLineAction, CommandLineOptions, WindowTarget};
 use crate::config;
 use crate::container::{self, Container, Containers};
 use crate::preferences::{Preferences, PreferencesInit, PreferencesInput};
 use crate::profile::{Profile, Profiles};
+use crate::session::{self, RestoreOptions, Session, SessionTab, SessionWindow};
 use crate::settings::{self, AppSettings, SettingsError};
 use crate::spawn::{HostSpawner, Spawner};
 use crate::tab::{Tab, TabInit, TabInput};
 use crate::telemetry::Pid;
-use crate::terminal::ZoomLevel;
+use crate::terminal::{self, ZoomLevel};
 use crate::window::{
     NewTabInContainerAction, NewTabWithProfileAction, Window, WindowInit, WindowInput,
 };
@@ -79,6 +81,11 @@ pub struct TabRequest {
     pub grid_size: Option<(u32, u32)>,
     /// Container to run in instead of the profile's default one.
     pub container: Option<Container>,
+    /// Id of a container to look up once containers are discovered, used
+    /// when `container` is unset (session restore).
+    pub container_id: Option<String>,
+    /// Title shown until the program sets one.
+    pub initial_title: Option<String>,
 }
 
 struct TabHandle {
@@ -89,7 +96,11 @@ struct TabHandle {
     color: Rc<Cell<Option<gdk::RGBA>>>,
     child_pid: Rc<Cell<Option<Pid>>>,
     css_class: String,
-    container: Option<Container>,
+    container: Rc<RefCell<Option<Container>>>,
+    initial_title: Option<String>,
+    /// The directory the tab was started in, saved in the session until
+    /// the shell reports one.
+    start_cwd_uri: Option<String>,
 }
 
 /// Cheap clones of a tab's shared state for use by windows.
@@ -115,15 +126,25 @@ pub struct WindowRef {
     pub tab_view: adw::TabView,
 }
 
-impl WindowRef {
-    /// Must not be called while the window component is updating, since it
-    /// borrows the component's model.
-    fn new(controller: &Controller<Window>) -> Self {
-        Self {
-            sender: controller.sender().clone(),
-            window: controller.widget().clone(),
-            tab_view: controller.model().tab_view().clone(),
+/// A launched window with its tab view, which is kept here so the session
+/// can be saved while a window component is updating (when its model
+/// cannot be borrowed).
+struct WindowEntry {
+    controller: Controller<Window>,
+    tab_view: adw::TabView,
+}
+
+impl WindowEntry {
+    fn window_ref(&self) -> WindowRef {
+        WindowRef {
+            sender: self.controller.sender().clone(),
+            window: self.controller.widget().clone(),
+            tab_view: self.tab_view.clone(),
         }
+    }
+
+    fn is(&self, window: &gtk::Window) -> bool {
+        self.controller.widget().upcast_ref::<gtk::Window>() == window
     }
 }
 
@@ -137,13 +158,16 @@ pub struct App {
     profile_menu: gio::Menu,
     /// Kept alive so their label-change handlers keep firing.
     menu_profiles: RefCell<Vec<Profile>>,
-    windows: RefCell<Vec<Controller<Window>>>,
+    windows: RefCell<Vec<WindowEntry>>,
     tabs: RefCell<HashMap<gtk::Widget, TabHandle>>,
     /// `--title` given without other options, applied when activation
     /// creates a window (`next_title_prefix` in the C code).
     next_title_prefix: RefCell<Option<String>>,
     /// The single preferences window, while open.
     preferences: RefCell<Option<Controller<Preferences>>>,
+    /// The session saved by the previous run, until it is restored
+    /// (`session` and `has_restored_session` in the C code).
+    session: RefCell<Option<Session>>,
 }
 
 relm4::new_action_group!(AppActions, "app");
@@ -193,6 +217,9 @@ impl App {
             tabs: RefCell::default(),
             next_title_prefix: RefCell::default(),
             preferences: RefCell::default(),
+            // Loaded at startup so it is at hand however tty-rex is
+            // launched (`ptyxis_application_startup()`).
+            session: RefCell::new(Session::load()),
         });
 
         let style_manager = adw::StyleManager::default();
@@ -229,9 +256,7 @@ impl App {
                 // its own handlers.
                 glib::idle_add_local_once(move || {
                     if let Some(app) = weak.upgrade() {
-                        app.windows
-                            .borrow_mut()
-                            .retain(|c| c.widget().upcast_ref::<gtk::Window>() != &window);
+                        app.windows.borrow_mut().retain(|e| !e.is(&window));
                         let mut preferences = app.preferences.borrow_mut();
                         if preferences
                             .as_ref()
@@ -269,9 +294,15 @@ impl App {
         let weak = Rc::downgrade(&app);
         let new_window = RelmAction::<NewWindowAction>::new_stateless(move |_| {
             if let Some(app) = weak.upgrade() {
-                app.open_window_with_tab(TabRequest::default())
-                    .window
-                    .present();
+                // GNOME Shell launches through this action rather than
+                // activation, so restore here too when nothing is open
+                // (`ptyxis_application_new_window_action()`).
+                let has_windows = !app.windows.borrow().is_empty();
+                if has_windows || !app.restore_session() {
+                    app.open_window_with_tab(TabRequest::default())
+                        .window
+                        .present();
+                }
             }
         });
         application.add_action(new_window.gio_action());
@@ -313,17 +344,24 @@ impl App {
         let zoom = Rc::new(Cell::new(request.zoom));
         let color = Rc::new(Cell::new(None));
         let child_pid = Rc::new(Cell::new(None));
+        let container = Rc::new(RefCell::new(request.container));
+        let start_cwd_uri = request
+            .initial_cwd_uri
+            .clone()
+            .or_else(|| request.previous_cwd_uri.clone());
         let controller = Tab::builder()
             .launch(TabInit {
                 profile,
                 app_settings: self.settings.clone(),
                 spawner: Rc::clone(&self.spawner),
                 containers: self.containers.clone(),
-                container: request.container.clone(),
+                container: Rc::clone(&container),
+                restored_container_id: request.container_id,
                 command: request.command,
                 initial_cwd_uri: request.initial_cwd_uri,
                 previous_cwd_uri: request.previous_cwd_uri,
                 title_prefix: request.title_prefix,
+                initial_title: request.initial_title.clone(),
                 zoom: Rc::clone(&zoom),
                 color: Rc::clone(&color),
                 child_pid: Rc::clone(&child_pid),
@@ -343,7 +381,9 @@ impl App {
                 color,
                 child_pid,
                 css_class,
-                container: request.container,
+                container,
+                initial_title: request.initial_title,
+                start_cwd_uri,
             },
         );
         Ok(child)
@@ -358,7 +398,7 @@ impl App {
             color: Rc::clone(&handle.color),
             css_class: handle.css_class.clone(),
             child_pid: Rc::clone(&handle.child_pid),
-            container: handle.container.clone(),
+            container: handle.container.borrow().clone(),
         })
     }
 
@@ -373,8 +413,13 @@ impl App {
                 app: Rc::clone(self),
             })
             .detach();
-        let handle = WindowRef::new(&controller);
-        self.windows.borrow_mut().push(controller);
+        let tab_view = controller.model().tab_view().clone();
+        let entry = WindowEntry {
+            controller,
+            tab_view,
+        };
+        let handle = entry.window_ref();
+        self.windows.borrow_mut().push(entry);
         handle
     }
 
@@ -382,11 +427,165 @@ impl App {
     pub fn current_window(&self) -> Option<WindowRef> {
         let windows = self.windows.borrow();
         let active = self.application.active_window();
-        let controller = windows
+        let entry = windows
             .iter()
-            .find(|c| active.as_ref() == Some(c.widget().upcast_ref()))
+            .find(|e| active.as_ref().is_some_and(|w| e.is(w)))
             .or_else(|| windows.first())?;
-        Some(WindowRef::new(controller))
+        Some(entry.window_ref())
+    }
+
+    /// Whether `window` is the only terminal window (`is_last_window()`).
+    /// Asks GTK rather than `windows`, which forgets closed windows only
+    /// on idle.
+    pub fn is_last_window(&self, window: &gtk::Window) -> bool {
+        let entries = self.windows.borrow();
+        self.application
+            .windows()
+            .iter()
+            .filter(|w| entries.iter().any(|e| e.is(w)))
+            .all(|w| w == window)
+    }
+
+    /// Recreates the windows of the previous session, once per run
+    /// (`ptyxis_application_restore()`); false if none came back.
+    fn restore_session(self: &Rc<Self>) -> bool {
+        let Some(saved) = self.session.take() else {
+            return false;
+        };
+        let plan = saved.restore_plan(RestoreOptions {
+            restore_session: self.settings.restore_session(),
+            restore_window_size: self.settings.restore_window_size(),
+            default_size: self.settings.default_grid_size(),
+        });
+        let mut added_window = false;
+        for planned in plan {
+            let window = self.new_window();
+            let mut active = None;
+            for tab in planned.tabs {
+                let Some(page) = self.append_tab(&window.tab_view, tab.request) else {
+                    continue;
+                };
+                window.tab_view.set_page_pinned(&page, tab.pinned);
+                if tab.active {
+                    active = Some(page);
+                }
+            }
+            if planned.add_default_tab
+                && let Some(page) = self.append_tab(&window.tab_view, TabRequest::default())
+            {
+                active.get_or_insert(page);
+            }
+            if window.tab_view.n_pages() == 0 {
+                window.window.destroy();
+                continue;
+            }
+            if planned.maximized {
+                window.window.maximize();
+            }
+            window.window.present();
+            if let Some(page) = active {
+                window.tab_view.set_selected_page(&page);
+            }
+            added_window = true;
+        }
+        added_window
+    }
+
+    /// Adds a tab at the end of `tab_view`, logging a failure.
+    fn append_tab(&self, tab_view: &adw::TabView, request: TabRequest) -> Option<adw::TabPage> {
+        match self.create_tab(request) {
+            Ok(child) => Some(tab_view.append(&child)),
+            Err(e) => {
+                glib::g_warning!("tty-rex", "Cannot restore a tab: {e}");
+                None
+            }
+        }
+    }
+
+    /// The windows and tabs to save, most recently focused window first
+    /// like `gtk_application_get_windows()` (`ptyxis_session_save()`).
+    fn session_state(&self) -> Session {
+        let restore_session = self.settings.restore_session();
+        let entries = self.windows.borrow();
+        let windows = self
+            .application
+            .windows()
+            .iter()
+            .filter_map(|window| entries.iter().find(|e| e.is(window)))
+            .map(|entry| {
+                let tab_view = &entry.tab_view;
+                let selected = tab_view.selected_page();
+                let tabs = (0..tab_view.n_pages())
+                    .map(|i| tab_view.nth_page(i))
+                    .filter(|page| restore_session || page.is_pinned())
+                    .filter_map(|page| self.session_tab(&page, selected.as_ref() == Some(&page)))
+                    .collect();
+                SessionWindow {
+                    maximized: entry.controller.widget().is_maximized(),
+                    tabs,
+                }
+            })
+            .collect();
+        Session { windows }
+    }
+
+    fn session_tab(&self, page: &adw::TabPage, active: bool) -> Option<SessionTab> {
+        let tabs = self.tabs.borrow();
+        let handle = tabs.get(&page.child())?;
+        let terminal = &handle.terminal;
+        let profile_default = self
+            .profiles
+            .profile(Some(&handle.profile_uuid))
+            .map(|p| p.default_container())
+            .unwrap_or_default();
+        let container = handle.container.borrow();
+        Some(SessionTab {
+            profile: Some(handle.profile_uuid.clone()),
+            pinned: page.is_pinned(),
+            size: u32::try_from(terminal.column_count())
+                .ok()
+                .zip(u32::try_from(terminal.row_count()).ok()),
+            zoom: handle.zoom.get(),
+            active,
+            // Before the program sets a title, keep the restored one.
+            window_title: terminal::window_title(terminal)
+                .filter(|t| !t.is_empty())
+                .or_else(|| handle.initial_title.clone()),
+            // A tab whose shell never reported a directory keeps the one
+            // it was started in.
+            cwd: terminal::current_directory_uri(terminal).or_else(|| handle.start_cwd_uri.clone()),
+            container: session::container_to_save(
+                container.as_ref().map(Container::id),
+                &profile_default,
+            ),
+        })
+    }
+
+    /// Writes the session in the background, keeping the application
+    /// alive until it is written (`ptyxis_application_save_session()`).
+    pub fn save_session(&self) {
+        let bytes = self.session_state().to_bytes();
+        let path = session::file_path();
+        if let Some(dir) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            glib::g_warning!("tty-rex", "Failed to save session state: {e}");
+            return;
+        }
+        let hold = self.application.hold();
+        gio::File::for_path(&path).replace_contents_async(
+            bytes,
+            None,
+            false,
+            gio::FileCreateFlags::REPLACE_DESTINATION,
+            None::<&gio::Cancellable>,
+            move |result| {
+                drop(hold);
+                if let Err((_, e)) = result {
+                    glib::g_warning!("tty-rex", "Failed to save session state: {e}");
+                }
+            },
+        );
     }
 
     /// Presents the preferences window, creating it if needed
@@ -475,6 +674,7 @@ impl App {
     fn activate(self: &Rc<Self>) {
         match self.current_window() {
             Some(window) => window.window.present(),
+            None if self.restore_session() => {}
             None => {
                 let request = TabRequest {
                     title_prefix: self.next_title_prefix.take(),
@@ -495,6 +695,15 @@ impl App {
                 return glib::ExitCode::FAILURE;
             }
         };
+
+        // Restore first so the session is not lost when tty-rex closes
+        // again, whatever the options; a standalone instance only restores
+        // when activated (`ptyxis_application_command_line()`).
+        let standalone = self
+            .application
+            .flags()
+            .contains(gio::ApplicationFlags::NON_UNIQUE);
+        let did_restore = !standalone && self.restore_session();
 
         match action {
             CommandLineAction::Preferences => {
@@ -519,6 +728,24 @@ impl App {
                     initial_cwd_uri: cwd_uri,
                     title_prefix: title,
                     ..Default::default()
+                };
+                // A bare --new-window (e.g. a keybinding that makes sure a
+                // window exists) is satisfied by the restored windows; with
+                // a directory it opens a tab in one of them.
+                let plain_new_window = options.new_window
+                    && request.command.is_none()
+                    && request.profile_uuid.is_none();
+                let target = match target {
+                    WindowTarget::New if did_restore && plain_new_window => {
+                        if options.working_directory.is_none()
+                            && let Some(window) = self.current_window()
+                        {
+                            window.window.present();
+                            return glib::ExitCode::SUCCESS;
+                        }
+                        WindowTarget::Current
+                    }
+                    target => target,
                 };
                 let window = match target {
                     WindowTarget::Current => self.current_window(),

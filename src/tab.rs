@@ -143,19 +143,20 @@ pub fn normalize_title_prefix(prefix: Option<String>) -> Option<String> {
     prefix.filter(|prefix| !prefix.is_empty())
 }
 
-/// Builds the tab title like `ptyxis_tab_dup_title()`.
+/// Builds the tab title like `ptyxis_tab_dup_title()`. `fallback` stands
+/// in for a missing window title: the command, else the initial title.
 pub fn compose_title(
     prefix: Option<&str>,
     ignore_osc_title: bool,
     window_title: Option<&str>,
-    command0: Option<&str>,
+    fallback: Option<&str>,
     state: TabState,
 ) -> String {
     let mut title = prefix.unwrap_or_default().to_owned();
     if !ignore_osc_title {
         match window_title.filter(|t| !t.is_empty()) {
             Some(window_title) => title.push_str(window_title),
-            None => title.push_str(command0.unwrap_or_default()),
+            None => title.push_str(fallback.unwrap_or_default()),
         }
     }
     if title.is_empty() {
@@ -368,8 +369,12 @@ pub struct TabInit {
     pub app_settings: AppSettings,
     pub spawner: Rc<dyn Spawner>,
     pub containers: Containers,
-    /// The container to run in instead of the profile's default one.
-    pub container: Option<Container>,
+    /// The container to run in instead of the profile's default one,
+    /// shared with the application for saving the session.
+    pub container: Rc<RefCell<Option<Container>>>,
+    /// Id of the container a restored tab ran in. Containers may still be
+    /// being discovered, so it is looked up when the tab first spawns.
+    pub restored_container_id: Option<String>,
     /// Explicit command (`ptyxis -x`); the tab closes when it exits.
     pub command: Option<Vec<String>>,
     /// Directory requested for this tab, e.g. via `--working-directory`.
@@ -377,6 +382,9 @@ pub struct TabInit {
     /// Directory of the tab this one was opened from.
     pub previous_cwd_uri: Option<String>,
     pub title_prefix: Option<String>,
+    /// Title shown until the program sets one, e.g. the title the tab had
+    /// when the session was saved (`ptyxis_tab_set_initial_title()`).
+    pub initial_title: Option<String>,
     pub zoom: Rc<Cell<ZoomLevel>>,
     /// The tab's color, shared with windows for the tab menu.
     pub color: Rc<Cell<Option<gdk::RGBA>>>,
@@ -431,11 +439,13 @@ pub struct Tab {
     containers: Containers,
     /// The container the tab was opened in, if not the profile's default
     /// (`container_at_creation`).
-    container: Option<Container>,
+    container: Rc<RefCell<Option<Container>>>,
+    restored_container_id: Option<String>,
     command: Option<Vec<String>>,
     initial_cwd_uri: Option<String>,
     previous_cwd_uri: Option<String>,
     title_prefix: Option<String>,
+    initial_title: Option<String>,
     /// Per tab like the C `ignore-osc-title` property, so the title dialog
     /// can change it without touching the setting.
     ignore_osc_title: bool,
@@ -564,6 +574,7 @@ impl Tab {
         // started in decides.
         let runtime = terminal::container_runtime(&self.terminal).or_else(|| {
             self.container
+                .borrow()
                 .clone()
                 .or_else(|| self.containers.lookup(&self.profile.default_container()))
                 .filter(|container| !container.is_session())
@@ -623,7 +634,8 @@ impl Tab {
             self.command
                 .as_ref()
                 .and_then(|c| c.first())
-                .map(String::as_str),
+                .map(String::as_str)
+                .or(self.initial_title.as_deref()),
             self.state,
         )
     }
@@ -651,14 +663,23 @@ impl Tab {
     fn respawn(&mut self, sender: &ComponentSender<Self>) {
         self.banner.set_visible(false);
         self.state = TabState::Spawning;
-        if let Some(container) = &self.container {
-            sender.input(TabInput::SpawnIn(Ok(container.clone())));
+        if let Some(container) = self.container.borrow().clone() {
+            sender.input(TabInput::SpawnIn(Ok(container)));
             return;
         }
+        let restored = self.restored_container_id.take();
+        let shared = Rc::clone(&self.container);
         let id = self.profile.default_container();
         let containers = self.containers.clone();
         let input = sender.input_sender().clone();
         self.containers.when_loaded(move || {
+            // Like ptyxis_session_restore(), a restored container that is
+            // gone leaves the profile's default one.
+            if let Some(container) = restored.and_then(|id| containers.lookup(&id)) {
+                *shared.borrow_mut() = Some(container.clone());
+                let _ = input.send(TabInput::SpawnIn(Ok(container)));
+                return;
+            }
             // The tab may have closed meanwhile; then nobody is listening.
             let _ = input.send(TabInput::SpawnIn(containers.lookup(&id).ok_or(id)));
         });
@@ -855,6 +876,7 @@ impl Component for Tab {
             spawner: init.spawner,
             containers: init.containers,
             container: init.container,
+            restored_container_id: init.restored_container_id,
             command: init.command,
             initial_cwd_uri: init.initial_cwd_uri,
             previous_cwd_uri: init.previous_cwd_uri,
@@ -864,6 +886,7 @@ impl Component for Tab {
             ),
             ignore_osc_title_setting,
             title_prefix,
+            initial_title: init.initial_title,
             zoom: init.zoom,
             state: TabState::Initial,
             spawned_at: Instant::now(),

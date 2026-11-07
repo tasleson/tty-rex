@@ -34,6 +34,13 @@ and apx ones by their labels, and runs shells in them through
 `podman exec` or `distrobox enter`. They appear in the new tab menu and
 as a profile's default container. Ptyxis's JHBuild entry is not ported.
 
+As in Ptyxis, closing the last window saves its windows and tabs (profile,
+directory, title, zoom, size and container) and the next start reopens
+them: every tab with "Restore Session" on, only pinned tabs otherwise. The
+state is kept in `~/.config/<app-id>/session.gvariant`, in the same format
+as Ptyxis's but separate from it, so the two do not overwrite each other's
+session.
+
 Beyond Ptyxis, "Show Telemetry" in the terminal's context menu
 (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> by default) toggles a footer
 with the network (TCP only), CPU and memory use of the processes started
@@ -55,7 +62,8 @@ produces a binary with a separate id, and the `.Devel` suffix adds
 libadwaita's development stripes). Importing or dropping palettes is not
 covered by the memory backend: it writes to
 `~/.local/share/<app-id>/palettes`, and palettes imported by Ptyxis are
-found as well.
+found as well. The saved session is not covered either; point `XDG_CONFIG_HOME`
+at a scratch directory to keep it apart.
 
 ## Installing for your user
 
