@@ -667,9 +667,7 @@ pub fn find_page(child: &impl IsA<gtk::Widget>) -> Option<(adw::TabView, adw::Ta
         .downcast::<adw::TabView>()
         .ok()?;
     let child = child.as_ref();
-    let page = (0..tab_view.n_pages())
-        .map(|i| tab_view.nth_page(i))
-        .find(|page| page.child() == *child)?;
+    let page = crate::window::pages(&tab_view).find(|page| page.child() == *child)?;
     Some((tab_view, page))
 }
 

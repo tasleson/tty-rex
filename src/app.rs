@@ -513,6 +513,18 @@ impl App {
         })
     }
 
+    /// The windows in `entries`, most recently focused first like
+    /// `gtk_application_get_windows()`.
+    fn ordered_entries<'a>(
+        &self,
+        entries: &'a [WindowEntry],
+    ) -> impl Iterator<Item = &'a WindowEntry> {
+        self.application
+            .windows()
+            .into_iter()
+            .filter_map(|window| entries.iter().find(|e| e.is(&window)))
+    }
+
     /// Selects and focuses the tab `uuid` in its window, searching windows
     /// from the most recently focused (`ptyxis_application_focus_tab_by_uuid()`).
     fn focus_tab_by_uuid(&self, uuid: &str) {
@@ -521,21 +533,13 @@ impl App {
         let found = {
             let entries = self.windows.borrow();
             let tabs = self.tabs.borrow();
-            self.application
-                .windows()
-                .iter()
-                .filter_map(|window| entries.iter().find(|e| e.is(window)))
-                .find_map(|entry| {
-                    let tab_view = &entry.tab_view;
-                    (0..tab_view.n_pages())
-                        .map(|i| tab_view.nth_page(i))
-                        .find_map(|page| {
-                            let handle = tabs.get(&page.child())?;
-                            (handle.uuid == uuid).then(|| {
-                                (entry.window_ref(), page, handle.controller.sender().clone())
-                            })
-                        })
+            self.ordered_entries(&entries).find_map(|entry| {
+                crate::window::pages(&entry.tab_view).find_map(|page| {
+                    let handle = tabs.get(&page.child())?;
+                    (handle.uuid == uuid)
+                        .then(|| (entry.window_ref(), page, handle.controller.sender().clone()))
                 })
+            })
         };
         // Like ptyxis_window_focus_tab_by_uuid().
         if let Some((window, page, tab)) = found {
@@ -669,15 +673,11 @@ impl App {
         let restore_session = self.settings.restore_session();
         let entries = self.windows.borrow();
         let windows = self
-            .application
-            .windows()
-            .iter()
-            .filter_map(|window| entries.iter().find(|e| e.is(window)))
+            .ordered_entries(&entries)
             .map(|entry| {
                 let tab_view = &entry.tab_view;
                 let selected = tab_view.selected_page();
-                let tabs = (0..tab_view.n_pages())
-                    .map(|i| tab_view.nth_page(i))
+                let tabs = crate::window::pages(tab_view)
                     .filter(|page| restore_session || page.is_pinned())
                     .filter_map(|page| self.session_tab(&page, selected.as_ref() == Some(&page)))
                     .collect();

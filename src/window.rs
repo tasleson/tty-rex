@@ -916,10 +916,7 @@ impl Closing {
         // Last to first, like the C loop.
         let mut running = Vec::new();
         let mut idle = Vec::new();
-        for page in (0..self.tab_view.n_pages())
-            .rev()
-            .map(|i| self.tab_view.nth_page(i))
-        {
+        for page in pages(&self.tab_view).rev() {
             match self.app.tab(&page.child()).filter(TabRef::is_running) {
                 Some(tab) => {
                     let row = close_dialog_row(&tab, &page);
@@ -958,10 +955,16 @@ impl Closing {
     }
 }
 
+/// The pages of `tab_view`, first to last.
+pub fn pages(tab_view: &adw::TabView) -> impl DoubleEndedIterator<Item = adw::TabPage> {
+    let pages = tab_view.pages();
+    (0..pages.n_items()).filter_map(move |i| pages.item(i).and_downcast::<adw::TabPage>())
+}
+
 /// Forgets all tabs of a window that is going away.
 fn release_tabs(app: &App, tab_view: &adw::TabView) {
-    for i in 0..tab_view.n_pages() {
-        app.remove_tab(&tab_view.nth_page(i).child());
+    for page in pages(tab_view) {
+        app.remove_tab(&page.child());
     }
 }
 
