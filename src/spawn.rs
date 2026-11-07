@@ -346,11 +346,16 @@ pub fn child_environment(profile_uuid: &str, vte_version: u32) -> Vec<String> {
 /// Sets each `KEY=VALUE` of `pairs` in `env`, replacing a variable of the
 /// same name, like the `g_environ_setenv()` loops of
 /// `ptyxis_client_spawn_async()`. A pair without `=` sets an empty value.
+///
+/// Pairs without a name (`=VALUE`) are dropped: Ptyxis's agent passes them
+/// on, but VTE refuses the whole environment over one and then never
+/// finishes the spawn, which would leave the tab stuck. They can come from
+/// any `org.freedesktop.Terminal1` caller.
 pub fn set_environment<'a>(env: &mut Vec<String>, pairs: impl IntoIterator<Item = &'a str>) {
     fn key(pair: &str) -> &str {
         pair.split_once('=').map_or(pair, |(key, _)| key)
     }
-    for pair in pairs {
+    for pair in pairs.into_iter().filter(|pair| !key(pair).is_empty()) {
         let pair = if pair.contains('=') {
             pair.to_owned()
         } else {
@@ -777,13 +782,15 @@ mod tests {
 
     #[test]
     fn set_environment_replaces_by_name() {
-        let cases: [(&[&str], &[&str], &[&str]); 5] = [
+        let cases: [(&[&str], &[&str], &[&str]); 6] = [
             (&[], &["A=1"], &["A=1"]),
             (&["A=1", "B=2"], &["A=3"], &["A=3", "B=2"]),
             (&["A=1"], &["B=2", "B=3"], &["A=1", "B=3"]),
             // Only the first `=` separates the name.
             (&["A=1"], &["A=x=y"], &["A=x=y"]),
             (&["A=1"], &["A", "C"], &["A=", "C="]),
+            // VTE rejects variables without a name.
+            (&["A=1"], &["=x", "", "="], &["A=1"]),
         ];
         for (env, pairs, expected) in cases {
             let mut env = strings(env);
