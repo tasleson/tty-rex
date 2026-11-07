@@ -33,6 +33,11 @@
 //! The icons in `ptyxis/icons/` are compiled into a GResource at the same
 //! paths as in Ptyxis's `src/ptyxis.gresource.xml`, so GTK finds them through the
 //! application's resource base path.
+//!
+//! The About dialog's troubleshooting information needs what the C build
+//! gets from its headers and `vcs_tag()`: the build identifier (`git
+//! describe`, falling back to the package version) and the GLib, GTK and
+//! VTE versions built against, which here come from `pkg-config`.
 
 use std::env;
 use std::fs;
@@ -220,6 +225,71 @@ fn generate_resources(src_dir: &Path, out_dir: &Path) {
     }
 }
 
+/// pkg-config modules whose versions the About dialog reports as "compiled
+/// against", with the environment variable each is exported as.
+const BUILD_VERSIONS: &[(&str, &str)] = &[
+    ("glib-2.0", "TTY_REX_BUILD_GLIB_VERSION"),
+    ("gtk4", "TTY_REX_BUILD_GTK_VERSION"),
+    ("vte-2.91-gtk4", "TTY_REX_BUILD_VTE_VERSION"),
+];
+/// Reported when pkg-config cannot tell a module's version.
+const UNKNOWN_VERSION: &str = "unknown";
+
+/// Runs `program` and returns its trimmed standard output, if it succeeded.
+fn command_output(program: &str, args: &[&str], dir: &Path) -> Option<String> {
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(text.trim().to_owned()).filter(|t| !t.is_empty())
+}
+
+/// Exports `TTY_REX_BUILD_IDENTIFIER` like the `vcs_tag()` producing
+/// `ptyxis-build-ident.h` in Ptyxis's `src/meson.build`: `git describe`,
+/// or the package version outside a tagged checkout.
+fn generate_build_identifier(manifest_dir: &Path) {
+    let git_dir = manifest_dir.join(".git");
+    let head = git_dir.join("HEAD");
+    if head.is_file() {
+        // Rerun when a commit, checkout or tag changes what `git describe`
+        // says. Only existing paths, as a missing one reruns every build.
+        let mut watched = vec![
+            head.clone(),
+            git_dir.join("packed-refs"),
+            git_dir.join("refs/tags"),
+        ];
+        if let Some(reference) = fs::read_to_string(&head)
+            .ok()
+            .and_then(|h| h.strip_prefix("ref: ").map(|r| r.trim().to_owned()))
+        {
+            watched.push(git_dir.join(reference));
+        }
+        for path in watched.iter().filter(|p| p.exists()) {
+            println!("cargo::rerun-if-changed={}", path.display());
+        }
+    }
+    let identifier = command_output("git", &["describe"], manifest_dir)
+        .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").expect("set by cargo"));
+    println!("cargo::rustc-env=TTY_REX_BUILD_IDENTIFIER={identifier}");
+}
+
+/// Exports the versions of the libraries tty-rex is built against.
+fn generate_build_versions(manifest_dir: &Path) {
+    println!("cargo::rerun-if-env-changed=PKG_CONFIG");
+    println!("cargo::rerun-if-env-changed=PKG_CONFIG_PATH");
+    let pkg_config = env::var("PKG_CONFIG").unwrap_or_else(|_| "pkg-config".to_owned());
+    for (module, var) in BUILD_VERSIONS {
+        let version = command_output(&pkg_config, &["--modversion", module], manifest_dir)
+            .unwrap_or_else(|| UNKNOWN_VERSION.to_owned());
+        println!("cargo::rustc-env={var}={version}");
+    }
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("set by cargo"));
     let manifest_dir = manifest_dir();
@@ -229,4 +299,6 @@ fn main() {
     generate_schemas(&src_dir, &manifest_dir.join(TTY_REX_DATA_DIR), &out_dir);
     generate_palettes(&src_dir, &out_dir);
     generate_resources(&src_dir, &out_dir);
+    generate_build_identifier(&manifest_dir);
+    generate_build_versions(&manifest_dir);
 }

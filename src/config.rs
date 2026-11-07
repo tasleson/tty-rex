@@ -38,6 +38,24 @@ pub const ISSUE_URL: &str = "https://github.com/tasleson/tty-rex/issues";
 /// Version advertised to child processes via `PTYXIS_VERSION`.
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// `git describe` at build time, or [`PACKAGE_VERSION`] outside a tagged
+/// checkout (`PTYXIS_BUILD_IDENTIFIER`, set by `build.rs`).
+pub const BUILD_IDENTIFIER: &str = env!("TTY_REX_BUILD_IDENTIFIER");
+
+/// Library versions tty-rex was built against, as pkg-config reported them
+/// to `build.rs` ("unknown" if it could not). The C build takes these from
+/// the `GLIB_*_VERSION`, `GTK_*_VERSION` and `VTE_*_VERSION` macros.
+pub const BUILD_GLIB_VERSION: &str = env!("TTY_REX_BUILD_GLIB_VERSION");
+pub const BUILD_GTK_VERSION: &str = env!("TTY_REX_BUILD_GTK_VERSION");
+pub const BUILD_VTE_VERSION: &str = env!("TTY_REX_BUILD_VTE_VERSION");
+
+/// Whether this is a development build, which Ptyxis decides with its
+/// `development` meson option (`DEVELOPMENT_BUILD`) and tty-rex with a
+/// `.Devel` application id.
+pub fn is_development_build() -> bool {
+    APP_ID.ends_with(".Devel")
+}
+
 /// The schema id is intentionally the stable (non-development) one so that
 /// existing user configuration is read and written.
 pub const SCHEMA_ID: &str = "org.gnome.Ptyxis";
