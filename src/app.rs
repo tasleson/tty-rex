@@ -861,15 +861,8 @@ impl App {
 
     fn command_line(self: &Rc<Self>, cmdline: &gio::ApplicationCommandLine) -> glib::ExitCode {
         let options = CommandLineOptions::from_dict(&cmdline.options_dict());
-        let caller_cwd = cmdline.cwd();
-        let action = match cli::plan(&options, caller_cwd.as_deref(), &glib::home_dir()) {
-            Ok(action) => action,
-            Err(e) => {
-                cmdline.printerr_literal(&format!("{e}\n"));
-                return glib::ExitCode::FAILURE;
-            }
-        };
-
+        // Recorded before the options are checked, so a command line that
+        // fails still leaves its request pending, as in Ptyxis.
         let mut pending = self.window_state.get();
         if pending.update(&options) {
             glib::g_warning!(
@@ -878,6 +871,15 @@ impl App {
             );
         }
         self.window_state.set(pending);
+
+        let caller_cwd = cmdline.cwd();
+        let action = match cli::plan(&options, caller_cwd.as_deref(), &glib::home_dir()) {
+            Ok(action) => action,
+            Err(e) => {
+                cmdline.printerr_literal(&format!("{e}\n"));
+                return glib::ExitCode::FAILURE;
+            }
+        };
 
         // Restore first so the session is not lost when tty-rex closes
         // again, whatever the options; a standalone instance only restores
