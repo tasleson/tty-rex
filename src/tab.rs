@@ -109,12 +109,13 @@ pub enum ExitOutcome {
 
 /// Decides how to react to a child exit, following `ptyxis_tab_wait_cb()`.
 ///
-/// `quick_exit` is true when the process exited soon after spawning and no
-/// key was pressed.
+/// `keep_open` is the tab's `keep-terminal-open` request. `quick_exit` is
+/// true when the process exited soon after spawning and no key was pressed.
 pub fn exit_outcome(
     exit: ChildExit,
     profile_action: ExitAction,
     has_command: bool,
+    keep_open: bool,
     quick_exit: bool,
 ) -> ExitOutcome {
     if let ChildExit::Signaled(signal) = exit {
@@ -127,6 +128,9 @@ pub fn exit_outcome(
     } else {
         profile_action
     };
+    if keep_open {
+        action = ExitAction::None;
+    }
     if (!has_command || !exit.is_success()) && quick_exit {
         action = ExitAction::None;
     }
@@ -444,6 +448,11 @@ pub struct TabInit {
     pub restored_container_id: Option<String>,
     /// Explicit command (`ptyxis -x`); the tab closes when it exits.
     pub command: Option<Vec<String>>,
+    /// `KEY=VALUE` pairs for the child (`ptyxis_tab_set_environment()`).
+    pub environment: Vec<String>,
+    /// Shows the exit banner instead of closing or restarting when the
+    /// child exits (`ptyxis_tab_set_keep_terminal_open()`).
+    pub keep_terminal_open: bool,
     /// Directory requested for this tab, e.g. via `--working-directory`.
     pub initial_cwd_uri: Option<String>,
     /// Directory of the tab this one was opened from.
@@ -530,6 +539,8 @@ pub struct Tab {
     container: Rc<RefCell<Option<Container>>>,
     restored_container_id: Option<String>,
     command: Option<Vec<String>>,
+    environment: Vec<String>,
+    keep_terminal_open: bool,
     initial_cwd_uri: Option<String>,
     previous_cwd_uri: Option<String>,
     title_prefix: Option<String>,
@@ -840,6 +851,7 @@ impl Tab {
             profile_uuid: self.profile.uuid().to_owned(),
             use_proxy: self.profile.use_proxy(),
             container,
+            environment: self.environment.clone(),
         };
 
         let spawned = sender.input_sender().clone();
@@ -871,6 +883,7 @@ impl Tab {
             exit,
             self.profile.exit_action(),
             self.command.is_some(),
+            self.keep_terminal_open,
             quick_exit,
         ) {
             ExitOutcome::Restart => self.respawn(sender),
@@ -1048,6 +1061,8 @@ impl Component for Tab {
             container: init.container,
             restored_container_id: init.restored_container_id,
             command: init.command,
+            environment: init.environment,
+            keep_terminal_open: init.keep_terminal_open,
             initial_cwd_uri: init.initial_cwd_uri,
             previous_cwd_uri: init.previous_cwd_uri,
             ignore_osc_title: should_ignore_osc_title(
@@ -1351,29 +1366,40 @@ mod tests {
         let banner = |s: &str| ExitOutcome::ShowBanner(s.to_owned());
         let exited = banner("Process Exited");
         let cases = [
-            // (exit, profile action, has command, quick exit, expected)
-            (Exited(0), A::Close, false, false, ExitOutcome::Close),
-            (Exited(0), A::Restart, false, false, ExitOutcome::Restart),
-            (Exited(0), A::None, false, false, exited.clone()),
-            (Exited(1), A::Close, false, false, ExitOutcome::Close),
-            (Exited(0), A::Close, false, true, exited.clone()),
-            (Exited(0), A::Restart, false, true, exited.clone()),
-            (Exited(0), A::None, true, false, ExitOutcome::Close),
-            (Exited(0), A::None, true, true, ExitOutcome::Close),
-            (Exited(2), A::Close, true, true, exited.clone()),
+            // (exit, profile action, has command, keep open, quick exit,
+            // expected)
+            (Exited(0), A::Close, false, false, false, ExitOutcome::Close),
+            (
+                Exited(0),
+                A::Restart,
+                false,
+                false,
+                false,
+                ExitOutcome::Restart,
+            ),
+            (Exited(0), A::None, false, false, false, exited.clone()),
+            (Exited(1), A::Close, false, false, false, ExitOutcome::Close),
+            (Exited(0), A::Close, false, false, true, exited.clone()),
+            (Exited(0), A::Restart, false, false, true, exited.clone()),
+            (Exited(0), A::None, true, false, false, ExitOutcome::Close),
+            (Exited(0), A::None, true, false, true, ExitOutcome::Close),
+            (Exited(2), A::Close, true, false, true, exited.clone()),
+            (Exited(0), A::Restart, false, true, false, exited.clone()),
+            (Exited(0), A::None, true, true, false, exited.clone()),
             (
                 Signaled(9),
                 A::Close,
                 false,
                 false,
+                false,
                 banner("Process Exited from Signal 9"),
             ),
         ];
-        for (exit, action, has_command, quick, expected) in cases {
+        for (exit, action, has_command, keep_open, quick, expected) in cases {
             assert_eq!(
-                exit_outcome(exit, action, has_command, quick),
+                exit_outcome(exit, action, has_command, keep_open, quick),
                 expected,
-                "{exit:?} {action:?} command={has_command} quick={quick}"
+                "{exit:?} {action:?} command={has_command} keep={keep_open} quick={quick}"
             );
         }
     }

@@ -96,6 +96,9 @@ pub struct SpawnRequest {
     pub use_proxy: bool,
     /// Where to run; the host session by default.
     pub container: Container,
+    /// `KEY=VALUE` pairs set last, over tty-rex's own variables
+    /// (`ptyxis_tab_set_environment()`).
+    pub environment: Vec<String>,
 }
 
 /// A fully resolved process to execute.
@@ -340,18 +343,38 @@ pub fn child_environment(profile_uuid: &str, vte_version: u32) -> Vec<String> {
     ]
 }
 
+/// Sets each `KEY=VALUE` of `pairs` in `env`, replacing a variable of the
+/// same name, like the `g_environ_setenv()` loops of
+/// `ptyxis_client_spawn_async()`. A pair without `=` sets an empty value.
+pub fn set_environment<'a>(env: &mut Vec<String>, pairs: impl IntoIterator<Item = &'a str>) {
+    fn key(pair: &str) -> &str {
+        pair.split_once('=').map_or(pair, |(key, _)| key)
+    }
+    for pair in pairs {
+        let pair = if pair.contains('=') {
+            pair.to_owned()
+        } else {
+            format!("{pair}=")
+        };
+        match env.iter_mut().find(|var| key(var) == key(&pair)) {
+            Some(var) => *var = pair,
+            None => env.push(pair),
+        }
+    }
+}
+
 /// Everything added to a child's environment: the proxy variables when
-/// the profile asks for them, then [`child_environment`].
+/// the profile asks for them, then [`child_environment`], then the tab's
+/// own variables.
 fn spawn_environment(request: &SpawnRequest) -> Vec<String> {
     let mut env = if request.use_proxy {
         proxy::environment()
     } else {
         Vec::new()
     };
-    env.extend(child_environment(
-        &request.profile_uuid,
-        vte_version_number(),
-    ));
+    let own = child_environment(&request.profile_uuid, vte_version_number());
+    set_environment(&mut env, own.iter().map(String::as_str));
+    set_environment(&mut env, request.environment.iter().map(String::as_str));
     env
 }
 
@@ -749,6 +772,23 @@ mod tests {
             &format!("PTYXIS_VERSION={}", config::PACKAGE_VERSION),
         ] {
             assert!(env.iter().any(|e| e == expected), "{expected}");
+        }
+    }
+
+    #[test]
+    fn set_environment_replaces_by_name() {
+        let cases: [(&[&str], &[&str], &[&str]); 5] = [
+            (&[], &["A=1"], &["A=1"]),
+            (&["A=1", "B=2"], &["A=3"], &["A=3", "B=2"]),
+            (&["A=1"], &["B=2", "B=3"], &["A=1", "B=3"]),
+            // Only the first `=` separates the name.
+            (&["A=1"], &["A=x=y"], &["A=x=y"]),
+            (&["A=1"], &["A", "C"], &["A=", "C="]),
+        ];
+        for (env, pairs, expected) in cases {
+            let mut env = strings(env);
+            set_environment(&mut env, pairs.iter().copied());
+            assert_eq!(env, strings(expected), "{pairs:?}");
         }
     }
 }

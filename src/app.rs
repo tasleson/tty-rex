@@ -75,6 +75,10 @@ pub struct TabRequest {
     /// Profile to use; `None` or unknown ids use the default profile.
     pub profile_uuid: Option<String>,
     pub command: Option<Vec<String>>,
+    /// `KEY=VALUE` pairs added to the child's environment.
+    pub environment: Vec<String>,
+    /// Keeps the tab open after its child exits.
+    pub keep_terminal_open: bool,
     pub initial_cwd_uri: Option<String>,
     pub previous_cwd_uri: Option<String>,
     pub title_prefix: Option<String>,
@@ -437,6 +441,8 @@ impl App {
                 container: Rc::clone(&container),
                 restored_container_id: request.container_id,
                 command: request.command,
+                environment: request.environment,
+                keep_terminal_open: request.keep_terminal_open,
                 initial_cwd_uri: request.initial_cwd_uri,
                 previous_cwd_uri: request.previous_cwd_uri,
                 title_prefix: request.title_prefix,
@@ -781,7 +787,7 @@ impl App {
     /// Opens a new window with a single tab.
     pub fn open_window_with_tab(self: &Rc<Self>, request: TabRequest) -> WindowRef {
         let window = self.new_window();
-        window.sender.emit(WindowInput::AddTab(request));
+        window.sender.emit(WindowInput::AddTab(Box::new(request)));
         window
     }
 
@@ -791,7 +797,7 @@ impl App {
         let request = TabRequest::default();
         match self.current_window() {
             Some(window) => {
-                window.sender.emit(WindowInput::AddTab(request));
+                window.sender.emit(WindowInput::AddTab(Box::new(request)));
                 window.window.present();
             }
             None => self.open_window_with_tab(request).window.present(),
@@ -887,7 +893,7 @@ impl App {
                     && !options.new_window
                     && request.profile_uuid.is_none();
                 let window = window.unwrap_or_else(|| self.launch_window(single_terminal));
-                window.sender.emit(WindowInput::AddTab(request));
+                window.sender.emit(WindowInput::AddTab(Box::new(request)));
                 window.window.present();
             }
         }

@@ -140,7 +140,7 @@ pub struct WindowInit {
 #[derive(Debug)]
 pub enum WindowInput {
     /// Adds a fully specified tab (used by the command line).
-    AddTab(TabRequest),
+    AddTab(Box<TabRequest>),
     /// Adds a tab inheriting directory, zoom and size from the active tab;
     /// `None` keeps the active tab's profile.
     NewTab {
@@ -1153,7 +1153,7 @@ impl Component for Window {
     fn update(&mut self, message: Self::Input, _sender: ComponentSender<Self>, _root: &Self::Root) {
         use crate::tab::TabInput;
         match message {
-            WindowInput::AddTab(request) => self.add_tab(request),
+            WindowInput::AddTab(request) => self.add_tab(*request),
             WindowInput::NewTab {
                 profile_uuid,
                 container_id,
@@ -1170,7 +1170,7 @@ impl Component for Window {
             WindowInput::NewWindow => {
                 let request = self.inherited_request(None);
                 let window = self.app.new_window();
-                window.sender.emit(WindowInput::AddTab(request));
+                window.sender.emit(WindowInput::AddTab(Box::new(request)));
                 window.window.present();
             }
             WindowInput::CloseTab => {
