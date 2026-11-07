@@ -29,7 +29,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use relm4::actions::{ActionName, EmptyType, RelmAction};
 use relm4::prelude::*;
 use vte::prelude::*;
@@ -41,7 +41,7 @@ use crate::container::Container;
 use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
 use crate::fullscreen_box::FullscreenBox;
 use crate::parking_lot::{self, ParkingLot};
-use crate::settings::NewTabPosition;
+use crate::settings::{NewTabPosition, TabMiddleClick};
 use crate::shortcuts::Shortcuts;
 use crate::tab_notify;
 use crate::telemetry_bar::{TelemetryBar, TelemetryBarInput};
@@ -62,6 +62,8 @@ pub const VISUAL_BELL_CLASS: &str = "visual-bell";
 /// build's 500 ms, synced with the 0.3 s animation).
 const VISUAL_BELL_DURATION: std::time::Duration = std::time::Duration::from_millis(500);
 const HAS_TAB_BAR_CLASS: &str = "has-tab-bar";
+/// libadwaita's private widget for one tab of an `AdwTabBar`.
+const ADW_TAB_TYPE_NAME: &str = "AdwTab";
 /// How long libadwaita animates closing the tab overview; focus moves to
 /// the selected tab again afterwards (`ptyxis_window_tab_overview_notify_open_cb()`).
 const OVERVIEW_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(425);
@@ -813,6 +815,52 @@ fn save_size(app: &App, tab_view: &adw::TabView) {
     }
 }
 
+/// The tab under a point of the tab bar
+/// (`ptyxis_window_get_tab_at_tab_bar_point()`). libadwaita keeps its tab
+/// widget type private, so it is found by name.
+fn tab_at_tab_bar_point(
+    app: &App,
+    tab_bar: &adw::TabBar,
+    x: f64,
+    y: f64,
+) -> Option<(adw::TabPage, TabRef)> {
+    let tab_type = glib::Type::from_name(ADW_TAB_TYPE_NAME)?;
+    let pick = tab_bar.pick(x, y, gtk::PickFlags::DEFAULT)?;
+    let tab = if pick.type_().is_a(tab_type) {
+        pick
+    } else {
+        pick.ancestor(tab_type)?
+    };
+    let page = tab.property::<Option<adw::TabPage>>("page")?;
+    let tab = app.tab(&page.child())?;
+    Some((page, tab))
+}
+
+/// Handles a middle click on the tab bar, capturing it before the tab
+/// sees it unless the tab should close as libadwaita does by default
+/// (`ptyxis_window_tab_bar_click_pressed_cb()`).
+fn tab_bar_middle_click_pressed(
+    app: &App,
+    tab_bar: &adw::TabBar,
+    tab_view: &adw::TabView,
+    click: &gtk::GestureClick,
+    x: f64,
+    y: f64,
+) {
+    let behavior = app.settings().tab_middle_click();
+    if behavior == TabMiddleClick::Close {
+        return;
+    }
+    let Some((page, tab)) = tab_at_tab_bar_point(app, tab_bar, x, y) else {
+        return;
+    };
+    tab_view.set_selected_page(&page);
+    if behavior == TabMiddleClick::Paste && terminal::can_paste(&tab.terminal) {
+        terminal::paste(&tab.terminal);
+    }
+    click.set_state(gtk::EventSequenceState::Claimed);
+}
+
 /// Asks before closing a tab that runs a program other than a shell
 /// (`ptyxis_window_close_page_cb()`). Confirming ends the program; the
 /// tab is still parked like any other closed one.
@@ -1374,6 +1422,27 @@ impl Component for Window {
         visual_bell.append(&header);
         toolbar_view.add_top_bar(&visual_bell);
         toolbar_view.add_top_bar(&tab_bar);
+        // Runs before the tabs' own middle-click gesture so it can keep a
+        // tab from closing (`ptyxis_window_init()`).
+        let click = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_MIDDLE)
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
+        let weak_app = Rc::downgrade(&app);
+        let weak_tab_view = tab_view.downgrade();
+        click.connect_pressed(move |click, _, x, y| {
+            let Some(app) = weak_app.upgrade() else {
+                return;
+            };
+            let Some(tab_view) = weak_tab_view.upgrade() else {
+                return;
+            };
+            let Some(tab_bar) = click.widget().and_downcast::<adw::TabBar>() else {
+                return;
+            };
+            tab_bar_middle_click_pressed(&app, &tab_bar, &tab_view, click, x, y);
+        });
+        tab_bar.add_controller(click);
         toolbar_view.set_content(Some(&content));
         let fullscreen_box = FullscreenBox::new(
             &window,

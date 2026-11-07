@@ -56,6 +56,7 @@ pub mod key {
     pub const RESTORE_WINDOW_SIZE: &str = "restore-window-size";
     pub const SCROLLBAR_POLICY: &str = "scrollbar-policy";
     pub const SHOW_WINDOW_SIZE: &str = "show-window-size";
+    pub const TAB_MIDDLE_CLICK: &str = "tab-middle-click";
     pub const TEXT_BLINK_MODE: &str = "text-blink-mode";
     pub const USE_SYSTEM_FONT: &str = "use-system-font";
     pub const VISUAL_BELL: &str = "visual-bell";
@@ -85,6 +86,7 @@ pub mod key {
         RESTORE_WINDOW_SIZE,
         SCROLLBAR_POLICY,
         SHOW_WINDOW_SIZE,
+        TAB_MIDDLE_CLICK,
         TEXT_BLINK_MODE,
         USE_SYSTEM_FONT,
         VISUAL_BELL,
@@ -329,6 +331,17 @@ nick_enum! {
     NewTabPosition: "NewTabPosition", default Last {
         Last => "last",
         Next => "next",
+    }
+}
+
+nick_enum! {
+    /// What a middle click on a tab in the tab bar does
+    /// (`PtyxisTabMiddleClickBehavior`). Every choice but closing also
+    /// selects the tab.
+    TabMiddleClick: "TabMiddleClickBehavior", default Close {
+        Close => "close",
+        Paste => "paste",
+        Nothing => "nothing",
     }
 }
 
@@ -606,6 +619,10 @@ impl AppSettings {
 
     pub fn new_tab_position(&self) -> NewTabPosition {
         self.enum_value(key::NEW_TAB_POSITION, NewTabPosition::from_nick_or_default)
+    }
+
+    pub fn tab_middle_click(&self) -> TabMiddleClick {
+        self.enum_value(key::TAB_MIDDLE_CLICK, TabMiddleClick::from_nick_or_default)
     }
 
     pub fn interface_style(&self) -> InterfaceStyle {
@@ -935,6 +952,7 @@ pub(crate) mod tests {
         check_enum!(PreserveContainer);
         check_enum!(PreserveDirectory);
         check_enum!(NewTabPosition);
+        check_enum!(TabMiddleClick);
         check_enum!(InterfaceStyle);
         check_enum!(EraseBinding);
         check_enum!(CjkAmbiguousWidth);
@@ -948,6 +966,7 @@ pub(crate) mod tests {
             (key::TEXT_BLINK_MODE, TextBlinkMode::default().nick()),
             (key::NEW_TAB_POSITION, NewTabPosition::default().nick()),
             (key::INTERFACE_STYLE, InterfaceStyle::default().nick()),
+            (key::TAB_MIDDLE_CLICK, TabMiddleClick::default().nick()),
         ];
         let block = schema_template::schema_block("@APP_SCHEMA_ID@");
         for (key, nick) in cases {
