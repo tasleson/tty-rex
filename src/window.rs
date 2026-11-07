@@ -138,7 +138,6 @@ relm4::new_stateless_action!(pub PreferencesAction, WindowActions, "preferences"
 // and are added by `add_shortcut_actions()`.
 relm4::new_stateless_action!(pub PrimaryMenuAction, WindowActions, "primary-menu");
 relm4::new_stateless_action!(pub TabMenuAction, WindowActions, "tab-menu");
-relm4::new_stateless_action!(pub PopupMenuAction, WindowActions, "popup-menu");
 relm4::new_stateless_action!(
     pub ShowKeyboardShortcutsAction,
     WindowActions,
@@ -769,8 +768,8 @@ fn release_parked(app: &App, parked: &RefCell<ParkingLot<gtk::Widget>>) {
 }
 
 /// Adds the actions only keyboard shortcuts activate. Ptyxis installs
-/// `tab.focus(i)` on the window, `menu.popup` is VTE's and the terminal
-/// shortcuts act on the terminal in focus; here they are window actions
+/// `tab.focus(i)` on the window and the terminal shortcuts act on the
+/// terminal in focus; here they are window actions
 /// working on the selected tab's terminal.
 ///
 /// `win.focus-tab(n)` selects the nth tab, or the last for 0 or a number
@@ -840,9 +839,6 @@ fn add_shortcut_actions(
             terminal.reset(true, clear.unwrap_or(false));
         },
     );
-    terminal_action("popup-menu", None, |terminal, _| {
-        terminal.activate_action("menu.popup", None).ok();
-    });
 
     let weak = primary_menu_button.downgrade();
     let primary_menu = gio::SimpleAction::new("primary-menu", None);

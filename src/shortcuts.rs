@@ -70,6 +70,9 @@ pub mod key {
     pub const ZOOM_OUT: &str = "zoom-out";
 }
 
+/// GTK's widget action for showing a widget's context menu.
+const MENU_POPUP_ACTION: &str = "menu.popup";
+
 /// Shortcut setting key and the detailed action it activates, such as
 /// `win.focus-tab(3)`, which carries its target as the shortcut's arguments.
 pub const BINDINGS: &[(&str, &str)] = &[
@@ -97,7 +100,10 @@ pub const BINDINGS: &[(&str, &str)] = &[
     (key::NEW_TAB, "win.new-tab"),
     (key::NEW_WINDOW, "win.new-window"),
     (key::PASTE_CLIPBOARD, "win.paste-clipboard"),
-    (key::POPUP_MENU, "win.popup-menu"),
+    // As `action(menu.popup)` in `ptyxis-terminal.ui`. VTE has no such
+    // action, so the key falls through to the terminal or the find bar
+    // entry (which opens its own menu) instead of being swallowed.
+    (key::POPUP_MENU, MENU_POPUP_ACTION),
     (key::PREFERENCES, "win.preferences"),
     (key::PRIMARY_MENU, "win.primary-menu"),
     (key::RESET, "win.reset(false)"),
@@ -556,10 +562,9 @@ mod tests {
     use crate::window::{
         CloseOtherTabsAction, CloseTabAction, CopyAction, DetachTabAction, MoveTabLeftAction,
         MoveTabRightAction, NewTabAction, NewWindowAction, NextTabAction, PasteAction,
-        PopupMenuAction, PreferencesAction, PreviousTabAction, PrimaryMenuAction, SearchAction,
-        SetTitleAction, ShowKeyboardShortcutsAction, TabMenuAction, TabOverviewAction,
-        ToggleFullscreenAction, ToggleTelemetryAction, UndoCloseTabAction, ZoomInAction,
-        ZoomOneAction, ZoomOutAction,
+        PreferencesAction, PreviousTabAction, PrimaryMenuAction, SearchAction, SetTitleAction,
+        ShowKeyboardShortcutsAction, TabMenuAction, TabOverviewAction, ToggleFullscreenAction,
+        ToggleTelemetryAction, UndoCloseTabAction, ZoomInAction, ZoomOneAction, ZoomOutAction,
     };
     use relm4::actions::ActionName;
 
@@ -625,7 +630,7 @@ mod tests {
             (key::NEW_TAB, NewTabAction::action_name()),
             (key::NEW_WINDOW, NewWindowAction::action_name()),
             (key::PASTE_CLIPBOARD, PasteAction::action_name()),
-            (key::POPUP_MENU, PopupMenuAction::action_name()),
+            (key::POPUP_MENU, MENU_POPUP_ACTION.to_string()),
             (key::PREFERENCES, PreferencesAction::action_name()),
             (key::PRIMARY_MENU, PrimaryMenuAction::action_name()),
             (key::RESET, "win.reset(false)".to_string()),
@@ -661,7 +666,10 @@ mod tests {
     fn detailed_actions_parse() {
         for (key, action) in BINDINGS {
             let (name, _) = gio::Action::parse_detailed_name(action).expect(key);
-            assert!(name.starts_with("win.") || name == "window.close", "{key}");
+            assert!(
+                name.starts_with("win.") || name == "window.close" || name == MENU_POPUP_ACTION,
+                "{key}"
+            );
         }
     }
 
