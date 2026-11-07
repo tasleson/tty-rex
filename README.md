@@ -49,9 +49,7 @@ reopens the oldest.
 
 Closing a tab or window while a program other than a shell runs in it
 asks first, as Ptyxis does with its `prompt-on-close` setting on (the
-default; Ptyxis has no preference for it either). tty-rex checks the
-foreground process when asked rather than relying on the last periodic
-check, so a program that just started or ended is judged correctly.
+default; Ptyxis has no preference for it either).
 
 Beyond Ptyxis, "Show Telemetry" in the terminal's context menu
 (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> by default) toggles a footer
