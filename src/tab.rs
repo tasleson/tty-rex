@@ -1491,7 +1491,13 @@ impl Component for Tab {
             TabInput::ScrollZoom(dy) => self.set_zoom(self.zoom.get().scrolled(dy)),
             TabInput::ZoomReset => self.set_zoom(ZoomLevel::DEFAULT),
             TabInput::Copy => self.terminal.copy_clipboard_format(vte::Format::Text),
-            TabInput::Paste => terminal::paste(&self.terminal),
+            // Ptyxis keeps clipboard.paste disabled unless the clipboard
+            // holds text (`ptyxis_terminal_update_clipboard_actions()`).
+            TabInput::Paste => {
+                if terminal::can_paste(&self.terminal) {
+                    terminal::paste(&self.terminal);
+                }
+            }
             TabInput::Inspect => {
                 // One inspector per tab: a second request raises it.
                 if let Some(inspector) = &self.inspector {
