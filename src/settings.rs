@@ -63,6 +63,7 @@ pub mod key {
     pub const VISUAL_BELL: &str = "visual-bell";
     pub const VISUAL_PROCESS_LEADER: &str = "visual-process-leader";
     pub const WINDOW_SIZE: &str = "window-size";
+    pub const WORD_CHAR_EXCEPTIONS: &str = "word-char-exceptions";
 
     /// All keys, for validation against the schema template.
     pub const ALL: &[&str] = &[
@@ -94,6 +95,7 @@ pub mod key {
         VISUAL_BELL,
         VISUAL_PROCESS_LEADER,
         WINDOW_SIZE,
+        WORD_CHAR_EXCEPTIONS,
     ];
 }
 
@@ -600,6 +602,16 @@ impl AppSettings {
         self.settings.boolean(key::TOAST_ON_COPY_CLIPBOARD)
     }
 
+    /// Punctuation that word-wise selection treats as part of a word, or
+    /// `None` (the `ms` key's `nothing`) for VTE's own set
+    /// (`ptyxis_settings_dup_word_char_exceptions()`).
+    pub fn word_char_exceptions(&self) -> Option<String> {
+        self.settings
+            .value(key::WORD_CHAR_EXCEPTIONS)
+            .get::<Option<String>>()
+            .flatten()
+    }
+
     pub fn ignore_osc_title(&self) -> bool {
         self.settings.boolean(key::IGNORE_OSC_TITLE)
     }
@@ -1075,6 +1087,25 @@ pub(crate) mod tests {
                 settings.gsettings().set_boolean(name, value).unwrap();
                 assert_eq!(get(&settings), value, "{name}");
             }
+        }
+    }
+
+    #[test]
+    fn word_char_exceptions_round_trip() {
+        if expected_schema(config::SCHEMA_ID).is_none() {
+            return;
+        }
+        use_memory_backend();
+        let settings = AppSettings::new().unwrap();
+        // Ptyxis leaves the key unset so VTE keeps its own exceptions.
+        assert_eq!(settings.word_char_exceptions(), None, "default");
+        // An empty string is distinct from unset: no exceptions at all.
+        for value in [Some("-_.~/"), Some(""), None] {
+            settings
+                .gsettings()
+                .set_value(key::WORD_CHAR_EXCEPTIONS, &value.to_variant())
+                .unwrap();
+            assert_eq!(settings.word_char_exceptions().as_deref(), value);
         }
     }
 

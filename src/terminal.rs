@@ -22,6 +22,7 @@
 //! that bind properties onto the terminal).
 
 use gtk::glib;
+use gtk::glib::translate::ToGlibPtr;
 use vte::prelude::*;
 
 use crate::palette::{self, Palette};
@@ -134,11 +135,26 @@ pub fn apply_app_settings(terminal: &vte::Terminal, settings: &AppSettings) {
     terminal.set_cursor_blink_mode(settings.cursor_blink_mode().into());
     terminal.set_text_blink_mode(settings.text_blink_mode().into());
     terminal.set_font(Some(&settings.font_desc()));
+    // Like ptyxis_tab_update_word_char_exceptions().
+    set_word_char_exceptions(terminal, settings.word_char_exceptions().as_deref());
     // Like ptyxis_tab_update_padding_cb().
     if settings.disable_padding() {
         terminal.remove_css_class(PADDED_CSS_CLASS);
     } else {
         terminal.add_css_class(PADDED_CSS_CLASS);
+    }
+}
+
+/// `vte_terminal_set_word_char_exceptions()`, where `None` restores VTE's
+/// default set. vte4-rs only wraps it with a `&str`, which cannot express
+/// the NULL that an unset Ptyxis key passes.
+fn set_word_char_exceptions(terminal: &vte::Terminal, exceptions: Option<&str>) {
+    // SAFETY: VTE copies the string; the stash outlives the call.
+    unsafe {
+        vte::ffi::vte_terminal_set_word_char_exceptions(
+            terminal.to_glib_none().0,
+            exceptions.to_glib_none().0,
+        );
     }
 }
 
