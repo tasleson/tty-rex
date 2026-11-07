@@ -235,6 +235,30 @@ pub fn connect_container_changed(
     })
 }
 
+/// Termprops set by shells through `vte.sh` before running a command and
+/// before showing the prompt again (`VTE_TERMPROP_SHELL_PREEXEC` and
+/// `VTE_TERMPROP_SHELL_PRECMD`).
+const TERMPROP_SHELL_PREEXEC: &str = "vte.shell.preexec";
+const TERMPROP_SHELL_PRECMD: &str = "vte.shell.precmd";
+
+/// Calls `f` when the shell is about to run a command (the
+/// `shell-preexec` signal of `PtyxisTerminal`).
+pub fn connect_shell_preexec(
+    terminal: &vte::Terminal,
+    f: impl Fn(&vte::Terminal) + 'static,
+) -> glib::SignalHandlerId {
+    terminal.connect_termprop_changed(Some(TERMPROP_SHELL_PREEXEC), move |terminal, _| f(terminal))
+}
+
+/// Calls `f` when the shell is about to show its prompt (the
+/// `shell-precmd` signal of `PtyxisTerminal`).
+pub fn connect_shell_precmd(
+    terminal: &vte::Terminal,
+    f: impl Fn(&vte::Terminal) + 'static,
+) -> glib::SignalHandlerId {
+    terminal.connect_termprop_changed(Some(TERMPROP_SHELL_PRECMD), move |terminal, _| f(terminal))
+}
+
 /// Collapses a directory URI for display, replacing `$HOME` with `~`
 /// like `ptyxis_path_collapse()`. Non-local URIs are shown verbatim.
 pub fn collapse_uri(uri: &str, home: &str) -> String {

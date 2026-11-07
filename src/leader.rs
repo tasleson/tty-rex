@@ -185,6 +185,12 @@ pub fn foreground_of(pgrp: i32, child_pid: Option<i32>) -> Option<Foreground> {
     })
 }
 
+/// The command line of process `pid` as printed by
+/// `get_cmdline_for_pid()`, or `None` if it cannot be read.
+pub fn process_cmdline(pid: i32) -> Option<String> {
+    read_cmdline(Path::new(PROC_DIR), pid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
