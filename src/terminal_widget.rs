@@ -759,23 +759,20 @@ mod imp {
                 return;
             };
 
-            let root = match root.node_type() {
-                gsk::RenderNodeType::ContainerNode => {
-                    let container = root
-                        .downcast_ref::<gsk::ContainerNode>()
-                        .expect("node type is ContainerNode");
-                    let children = rewrite_children(container);
-                    if children.is_empty() {
-                        root
-                    } else {
-                        gsk::ContainerNode::new(&children).upcast()
-                    }
-                }
+            let root = if let Some(container) = root.downcast_ref::<gsk::ContainerNode>() {
+                // Nothing to rewrite, or nothing left of the children,
+                // keeps VTE's own container.
+                rewrite_children(container)
+                    .filter(|children| !children.is_empty())
+                    .map(|children| gsk::ContainerNode::new(&children).upcast())
+            } else if root.node_type() == gsk::RenderNodeType::ColorNode {
                 // A lone color node is a cursor blink frame with no cursor
                 // drawn: only the background, which is dropped as above.
-                gsk::RenderNodeType::ColorNode => return,
-                _ => root,
-            };
+                return;
+            } else {
+                None
+            }
+            .unwrap_or(root);
             snapshot.append_node(root);
         }
     }
@@ -917,26 +914,28 @@ mod imp {
     }
 
     /// Children of VTE's root container minus the first color node, with
-    /// clip nodes replaced by their child.
-    fn rewrite_children(container: &gsk::ContainerNode) -> Vec<gsk::RenderNode> {
+    /// clip nodes replaced by their child; `None` when there is neither.
+    fn rewrite_children(container: &gsk::ContainerNode) -> Option<Vec<gsk::RenderNode>> {
         let mut dropped_background = false;
-        let mut children = Vec::new();
+        let mut rewritten = false;
+        let mut children = Vec::with_capacity(container.n_children() as usize);
         for i in 0..container.n_children() {
             let node = container.child(i);
             match node.node_type() {
                 gsk::RenderNodeType::ColorNode if !dropped_background => {
                     dropped_background = true;
+                    rewritten = true;
                 }
-                gsk::RenderNodeType::ClipNode => {
-                    let clip = node
-                        .downcast_ref::<gsk::ClipNode>()
-                        .expect("node type is ClipNode");
-                    children.push(clip.child());
-                }
-                _ => children.push(node),
+                _ => match node.downcast_ref::<gsk::ClipNode>() {
+                    Some(clip) => {
+                        rewritten = true;
+                        children.push(clip.child());
+                    }
+                    None => children.push(node),
+                },
             }
         }
-        children
+        rewritten.then_some(children)
     }
 }
 
