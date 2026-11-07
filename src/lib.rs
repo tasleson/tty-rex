@@ -44,6 +44,7 @@ pub mod config;
 pub mod container;
 pub mod dressing;
 pub mod find_bar;
+pub mod fullscreen_box;
 pub mod inspector;
 pub mod leader;
 pub mod links;

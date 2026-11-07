@@ -39,6 +39,7 @@ use crate::close_dialog;
 use crate::config;
 use crate::container::Container;
 use crate::find_bar::{FindBar, FindBarInput, FindBarOutput};
+use crate::fullscreen_box::FullscreenBox;
 use crate::parking_lot::{self, ParkingLot};
 use crate::settings::NewTabPosition;
 use crate::shortcuts::Shortcuts;
@@ -111,6 +112,7 @@ relm4::new_stateless_action!(pub SetTitleAction, WindowActions, "set-title");
 relm4::new_stateless_action!(pub SetProfileAction, WindowActions, "set-profile");
 relm4::new_stateless_action!(pub FullscreenAction, WindowActions, "fullscreen");
 relm4::new_stateless_action!(pub UnfullscreenAction, WindowActions, "unfullscreen");
+relm4::new_stateless_action!(pub ToggleFullscreenAction, WindowActions, "toggle-fullscreen");
 // Tab colors and the telemetry footer are tty-rex additions, so these
 // have no C counterpart. The telemetry action's state is whether the
 // footer shows; activating it toggles that.
@@ -760,10 +762,12 @@ fn release_parked(app: &App, parked: &RefCell<ParkingLot<gtk::Widget>>) {
     }
 }
 
-/// Adds `win.fullscreen` and `win.unfullscreen`, each enabled only when
-/// it would change something, so "Leave Fullscreen" shows in the terminal
-/// menu only in fullscreen (`ptyxis_window_toplevel_state_changed_cb()`).
-fn track_fullscreen(window: &adw::ApplicationWindow) {
+/// Adds `win.fullscreen`, `win.unfullscreen` and `win.toggle-fullscreen`.
+/// The first two are each enabled only when it would change something, so
+/// "Leave Fullscreen" shows in the terminal menu only in fullscreen
+/// (`ptyxis_window_toplevel_state_changed_cb()`), which also hands the state
+/// to the `fullscreen_box` and marks the window with the `fullscreen` class.
+fn track_fullscreen(window: &adw::ApplicationWindow, fullscreen_box: FullscreenBox) {
     let weak = window.downgrade();
     let fullscreen = RelmAction::<FullscreenAction>::new_stateless(move |_| {
         if let Some(window) = weak.upgrade() {
@@ -780,10 +784,33 @@ fn track_fullscreen(window: &adw::ApplicationWindow) {
     let unfullscreen = unfullscreen.gio_action().clone();
     window.add_action(&fullscreen);
     window.add_action(&unfullscreen);
+    let weak = window.downgrade();
+    let toggle = RelmAction::<ToggleFullscreenAction>::new_stateless(move |_| {
+        if let Some(window) = weak.upgrade() {
+            if window.is_fullscreen() {
+                window.unfullscreen();
+            } else {
+                window.fullscreen();
+            }
+        }
+    });
+    window.add_action(toggle.gio_action());
+    let was_fullscreen = Cell::new(false);
     let update = move |window: &adw::ApplicationWindow| {
         let is_fullscreen = window.is_fullscreen();
         fullscreen.set_enabled(!is_fullscreen);
         unfullscreen.set_enabled(is_fullscreen);
+        fullscreen_box.set_fullscreen(is_fullscreen);
+        // The bars slide in when entering fullscreen so the way out is seen.
+        if is_fullscreen && !was_fullscreen.get() {
+            fullscreen_box.reveal();
+        }
+        was_fullscreen.set(is_fullscreen);
+        if is_fullscreen {
+            window.add_css_class("fullscreen");
+        } else {
+            window.remove_css_class("fullscreen");
+        }
     };
     update(window);
     window.connect_fullscreened_notify(update);
@@ -910,6 +937,14 @@ fn build_primary_menu() -> gio::Menu {
     section.append_item(&RelmAction::<CloseTabAction>::to_menu_item("_Close Tab"));
     menu.append_section(None, &section);
     let section = gio::Menu::new();
+    let fullscreen = RelmAction::<FullscreenAction>::to_menu_item("Fullscreen");
+    hide_when_disabled(&fullscreen);
+    section.append_item(&fullscreen);
+    let unfullscreen = RelmAction::<UnfullscreenAction>::to_menu_item("Leave Fullscreen");
+    hide_when_disabled(&unfullscreen);
+    section.append_item(&unfullscreen);
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
     section.append_item(&RelmAction::<PreferencesAction>::to_menu_item(
         "_Preferences",
     ));
@@ -991,6 +1026,28 @@ impl Component for Window {
             .focus_on_click(false)
             .build();
         header.pack_end(&tab_overview_button);
+        // The window buttons give way to "Leave Fullscreen" in fullscreen.
+        let restore_button = gtk::Button::builder()
+            .icon_name("view-restore-symbolic")
+            .tooltip_text("Leave Fullscreen")
+            .action_name(UnfullscreenAction::action_name())
+            .visible(false)
+            .build();
+        header.pack_end(&restore_button);
+        window
+            .bind_property("fullscreened", &restore_button, "visible")
+            .sync_create()
+            .build();
+        window
+            .bind_property("fullscreened", &header, "show-start-title-buttons")
+            .sync_create()
+            .invert_boolean()
+            .build();
+        window
+            .bind_property("fullscreened", &header, "show-end-title-buttons")
+            .sync_create()
+            .invert_boolean()
+            .build();
         add_theme_controls(&window, &primary_menu_button, app.settings());
 
         let find_bar = FindBar::builder()
@@ -1028,6 +1085,11 @@ impl Component for Window {
         toolbar_view.add_top_bar(&visual_bell);
         toolbar_view.add_top_bar(&tab_bar);
         toolbar_view.set_content(Some(&content));
+        let fullscreen_box = FullscreenBox::new(
+            &window,
+            &toolbar_view,
+            &[visual_bell.clone().upcast(), tab_bar.clone().upcast()],
+        );
         let tab_overview = adw::TabOverview::builder()
             .view(&tab_view)
             .child(&toolbar_view)
@@ -1151,7 +1213,7 @@ impl Component for Window {
             reset_color.set_enabled(has_color);
         });
         add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
-        track_fullscreen(&window);
+        track_fullscreen(&window, fullscreen_box);
         track_set_profile(&window, &app, &tab_view, &sender);
         add_action::<PreferencesAction>(&window, &sender, || WindowInput::ShowPreferences);
         add_action::<ShowKeyboardShortcutsAction>(&window, &sender, || {
