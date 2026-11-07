@@ -241,6 +241,9 @@ impl Component for TelemetryBar {
                     self.tick(&sender);
                 } else {
                     self.stop_timer();
+                    if let Some(sampler) = &mut self.sampler {
+                        sampler.release();
+                    }
                 }
             }
             TelemetryBarInput::SetTab(source) => {
@@ -278,7 +281,12 @@ impl Component for TelemetryBar {
             // Its baseline belongs to another tab or an earlier showing;
             // start the current one's right away rather than a tick late.
             let mut sampler = done.sampler;
-            sampler.reset();
+            if self.visible {
+                sampler.reset();
+            } else {
+                // Hidden meanwhile: do not keep the socket open.
+                sampler.release();
+            }
             self.sampler = Some(sampler);
             self.tick(&sender);
         }

@@ -263,6 +263,13 @@ impl Sampler {
         self.baseline = None;
     }
 
+    /// Forgets the baseline and closes the netlink socket, for when
+    /// sampling stops for a while.
+    pub fn release(&mut self) {
+        self.reset();
+        self.diag.close();
+    }
+
     /// Samples the tree rooted at `root`. Changing the root starts over
     /// with a baseline. Never fails: what cannot be read is `None`.
     pub fn sample(&mut self, root: Pid) -> Readings {

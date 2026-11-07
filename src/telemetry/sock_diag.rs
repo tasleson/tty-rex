@@ -336,6 +336,11 @@ pub struct DiagClient {
 }
 
 impl DiagClient {
+    /// Closes the netlink socket; the next call opens a new one.
+    pub fn close(&mut self) {
+        self.socket = None;
+    }
+
     /// Byte counters of the TCP sockets among `inodes` (IPv4 and IPv6).
     /// Sockets without `tcp_info` counters are left out.
     pub fn tcp_counters(&mut self, inodes: &HashSet<u64>) -> io::Result<HashMap<u64, TcpCounters>> {
