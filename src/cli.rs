@@ -33,7 +33,9 @@ use gtk::{gio, prelude::*};
 /// Long option names, shared by registration and lookup.
 pub mod option {
     pub const EXECUTE: &str = "execute";
+    pub const FULLSCREEN: &str = "fullscreen";
     pub const IMPORT_PALETTE: &str = "import-palette";
+    pub const MAXIMIZE: &str = "maximize";
     pub const NEW_WINDOW: &str = "new-window";
     pub const PREFERENCES: &str = "preferences";
     pub const STANDALONE: &str = "standalone";
@@ -101,6 +103,27 @@ const OPTIONS: &[OptionSpec] = &[
         description: "Start a new instance, ignoring existing instances",
         arg_description: None,
     },
+    OptionSpec {
+        long: option::TITLE,
+        short: Some(b'T'),
+        arg: glib::OptionArg::String,
+        description: "Set title for new tab",
+        arg_description: None,
+    },
+    OptionSpec {
+        long: option::MAXIMIZE,
+        short: None,
+        arg: glib::OptionArg::None,
+        description: "Maximize a newly created window",
+        arg_description: None,
+    },
+    OptionSpec {
+        long: option::FULLSCREEN,
+        short: None,
+        arg: glib::OptionArg::None,
+        description: "Fullscreen a newly created window",
+        arg_description: None,
+    },
     // Handled before GApplication runs (see `preprocess_args`); registered
     // so it shows up in --help like in the C version.
     OptionSpec {
@@ -109,13 +132,6 @@ const OPTIONS: &[OptionSpec] = &[
         arg: glib::OptionArg::String,
         description: "Import a Ptyxis palette file",
         arg_description: Some("FILE"),
-    },
-    OptionSpec {
-        long: option::TITLE,
-        short: Some(b'T'),
-        arg: glib::OptionArg::String,
-        description: "Set title for new tab",
-        arg_description: None,
     },
 ];
 
@@ -230,6 +246,8 @@ pub struct CommandLineOptions {
     pub execute: Option<String>,
     pub working_directory: Option<PathBuf>,
     pub title: Option<String>,
+    pub maximize: bool,
+    pub fullscreen: bool,
 }
 
 impl CommandLineOptions {
@@ -246,6 +264,8 @@ impl CommandLineOptions {
                 .ok()
                 .flatten(),
             title: string(option::TITLE).filter(|t| !t.is_empty()),
+            maximize: dict.contains(option::MAXIMIZE),
+            fullscreen: dict.contains(option::FULLSCREEN),
         }
     }
 }
@@ -279,7 +299,60 @@ pub enum CommandLineAction {
         command: Option<Vec<String>>,
         cwd_uri: Option<String>,
         title: Option<String>,
+        /// Whether `--maximize`/`--fullscreen` apply to the window the tab
+        /// lands in, which Ptyxis only does for `-x` and `--new-window`
+        /// (`maybe_maximize_or_fullscreen()`), never for `--tab` or
+        /// `--tab-with-profile`.
+        applies_window_state: bool,
     },
+}
+
+/// How a window opened from the command line should be shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowState {
+    Maximized,
+    Fullscreen,
+}
+
+/// `--maximize`/`--fullscreen` waiting for the next window that
+/// `maybe_maximize_or_fullscreen()` is called for (the `maximize` and
+/// `fullscreen` bits of `PtyxisApplication`).
+///
+/// Like Ptyxis, an option only sets its bit and never clears it, so a
+/// request that opened no window (say `--tab --maximize`) stays pending
+/// for the next window a later command line or activation opens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PendingWindowState {
+    maximize: bool,
+    fullscreen: bool,
+}
+
+impl PendingWindowState {
+    /// Records the options of a command line. Returns true when both are
+    /// now pending, in which case fullscreen wins and the caller should
+    /// warn as Ptyxis does.
+    pub fn update(&mut self, options: &CommandLineOptions) -> bool {
+        self.maximize |= options.maximize;
+        self.fullscreen |= options.fullscreen;
+        let conflict = self.maximize && self.fullscreen;
+        if conflict {
+            self.maximize = false;
+        }
+        conflict
+    }
+
+    /// Consumes the pending state for a window about to be presented.
+    pub fn take(&mut self) -> Option<WindowState> {
+        let state = if self.fullscreen {
+            Some(WindowState::Fullscreen)
+        } else if self.maximize {
+            Some(WindowState::Maximized)
+        } else {
+            None
+        };
+        *self = Self::default();
+        state
+    }
 }
 
 /// Converts `--working-directory` (or the caller's cwd) into a URI the
@@ -327,6 +400,10 @@ pub fn plan(
     };
     let title = options.title.clone();
     let profile_uuid = options.tab_with_profile.clone();
+    // ptyxis_application_command_line() checks --tab before
+    // --tab-with-profile before --new-window, and only the --new-window
+    // and plain -x branches maximize or fullscreen.
+    let applies_window_state = !options.tab && profile_uuid.is_none();
 
     if options.preferences {
         return Ok(CommandLineAction::Preferences);
@@ -344,6 +421,7 @@ pub fn plan(
             command: Some(argv),
             cwd_uri,
             title,
+            applies_window_state,
         });
     }
 
@@ -354,6 +432,7 @@ pub fn plan(
             command: None,
             cwd_uri,
             title,
+            applies_window_state,
         });
     }
 
@@ -472,14 +551,16 @@ mod tests {
         let cwd = Some(Path::new("/srv"));
         let cwd_uri = Some("file:///srv".to_owned());
         let opts = CommandLineOptions::default;
-        let tab = |target, profile_uuid: Option<&str>, command: Option<&[&str]>| {
-            CommandLineAction::OpenTab {
-                target,
-                profile_uuid: profile_uuid.map(str::to_owned),
-                command: command.map(strings),
-                cwd_uri: cwd_uri.clone(),
-                title: None,
-            }
+        let tab = |target,
+                   profile_uuid: Option<&str>,
+                   command: Option<&[&str]>,
+                   applies_window_state| CommandLineAction::OpenTab {
+            target,
+            profile_uuid: profile_uuid.map(str::to_owned),
+            command: command.map(strings),
+            cwd_uri: cwd_uri.clone(),
+            title: None,
+            applies_window_state,
         };
         use WindowTarget::{Current, New};
 
@@ -507,21 +588,21 @@ mod tests {
                     tab: true,
                     ..opts()
                 },
-                tab(Current, None, None),
+                tab(Current, None, None, false),
             ),
             (
                 CommandLineOptions {
                     new_window: true,
                     ..opts()
                 },
-                tab(New, None, None),
+                tab(New, None, None, true),
             ),
             (
                 CommandLineOptions {
                     tab_with_profile: Some("p".into()),
                     ..opts()
                 },
-                tab(Current, Some("p"), None),
+                tab(Current, Some("p"), None, false),
             ),
             (
                 CommandLineOptions {
@@ -529,14 +610,14 @@ mod tests {
                     new_window: true,
                     ..opts()
                 },
-                tab(New, Some("p"), None),
+                tab(New, Some("p"), None, false),
             ),
             (
                 CommandLineOptions {
                     execute: Some("htop -d 5".into()),
                     ..opts()
                 },
-                tab(New, None, Some(&["htop", "-d", "5"])),
+                tab(New, None, Some(&["htop", "-d", "5"]), true),
             ),
             (
                 CommandLineOptions {
@@ -544,11 +625,66 @@ mod tests {
                     tab: true,
                     ..opts()
                 },
-                tab(Current, None, Some(&["htop"])),
+                tab(Current, None, Some(&["htop"]), false),
+            ),
+            (
+                CommandLineOptions {
+                    execute: Some("htop".into()),
+                    new_window: true,
+                    tab_with_profile: Some("p".into()),
+                    ..opts()
+                },
+                tab(New, Some("p"), Some(&["htop"]), false),
+            ),
+            (
+                CommandLineOptions {
+                    execute: Some("htop".into()),
+                    new_window: true,
+                    ..opts()
+                },
+                tab(New, None, Some(&["htop"]), true),
             ),
         ];
         for (options, expected) in cases {
             assert_eq!(plan(&options, cwd, home), Ok(expected), "{options:?}");
+        }
+    }
+
+    #[test]
+    fn pending_window_state() {
+        use WindowState::{Fullscreen, Maximized};
+        let opts = |maximize, fullscreen| CommandLineOptions {
+            maximize,
+            fullscreen,
+            ..Default::default()
+        };
+        // (maximize, fullscreen) of one command line.
+        type Line = (bool, bool);
+        // Each case feeds command lines in order, then takes the state.
+        let cases: &[(&[Line], bool, Option<WindowState>)] = &[
+            (&[], false, None),
+            (&[(false, false)], false, None),
+            (&[(true, false)], false, Some(Maximized)),
+            (&[(false, true)], false, Some(Fullscreen)),
+            (&[(true, true)], true, Some(Fullscreen)),
+            // An unconsumed request carries over to the next command line.
+            (&[(true, false), (false, false)], false, Some(Maximized)),
+            (&[(true, false), (false, true)], true, Some(Fullscreen)),
+            (&[(false, true), (true, false)], true, Some(Fullscreen)),
+        ];
+        for (lines, conflict, expected) in cases {
+            let mut pending = PendingWindowState::default();
+            let conflicts = lines
+                .iter()
+                .map(|&(m, f)| pending.update(&opts(m, f)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                conflicts.last().copied().unwrap_or(false),
+                *conflict,
+                "{lines:?}"
+            );
+            assert_eq!(pending.take(), *expected, "{lines:?}");
+            assert_eq!(pending.take(), None, "{lines:?} taken twice");
         }
     }
 
@@ -580,6 +716,7 @@ mod tests {
         dict.insert(option::TAB, true);
         dict.insert(option::EXECUTE, "top");
         dict.insert(option::TITLE, "");
+        dict.insert(option::FULLSCREEN, true);
         dict.insert_value(
             option::WORKING_DIRECTORY,
             &PathBuf::from("/tmp").to_variant(),
@@ -591,6 +728,7 @@ mod tests {
                 tab: true,
                 execute: Some("top".into()),
                 working_directory: Some(PathBuf::from("/tmp")),
+                fullscreen: true,
                 ..Default::default()
             }
         );

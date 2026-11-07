@@ -37,7 +37,9 @@ use relm4::prelude::*;
 use vte::prelude::*;
 
 use crate::application::{self, Application};
-use crate::cli::{self, CommandLineAction, CommandLineOptions, WindowTarget};
+use crate::cli::{
+    self, CommandLineAction, CommandLineOptions, PendingWindowState, WindowState, WindowTarget,
+};
 use crate::config;
 use crate::container::{self, Container, Containers};
 use crate::leader;
@@ -190,6 +192,9 @@ pub struct App {
     /// `--title` given without other options, applied when activation
     /// creates a window (`next_title_prefix` in the C code).
     next_title_prefix: RefCell<Option<String>>,
+    /// `--maximize`/`--fullscreen` for the next window the command line
+    /// or activation opens.
+    window_state: Cell<PendingWindowState>,
     /// The single preferences window, while open.
     preferences: RefCell<Option<Controller<Preferences>>>,
     /// The session saved by the previous run, until it is restored
@@ -293,6 +298,7 @@ impl App {
             windows: RefCell::default(),
             tabs: RefCell::default(),
             next_title_prefix: RefCell::default(),
+            window_state: Cell::default(),
             preferences: RefCell::default(),
             // Loaded at startup so it is at hand however tty-rex is
             // launched (`ptyxis_application_startup()`).
@@ -824,6 +830,19 @@ impl App {
         Ok(())
     }
 
+    /// Maximizes or fullscreens `window` if the command line asked for it,
+    /// once (`maybe_maximize_or_fullscreen()`).
+    fn maybe_maximize_or_fullscreen(&self, window: &adw::ApplicationWindow) {
+        let mut pending = self.window_state.get();
+        let state = pending.take();
+        self.window_state.set(pending);
+        match state {
+            Some(WindowState::Fullscreen) => window.fullscreen(),
+            Some(WindowState::Maximized) => window.maximize(),
+            None => {}
+        }
+    }
+
     fn activate(self: &Rc<Self>) {
         match self.current_window() {
             Some(window) => window.window.present(),
@@ -833,7 +852,9 @@ impl App {
                     title_prefix: self.next_title_prefix.take(),
                     ..Default::default()
                 };
-                self.open_window_with_tab(request).window.present();
+                let window = self.open_window_with_tab(request).window;
+                self.maybe_maximize_or_fullscreen(&window);
+                window.present();
             }
         }
     }
@@ -848,6 +869,15 @@ impl App {
                 return glib::ExitCode::FAILURE;
             }
         };
+
+        let mut pending = self.window_state.get();
+        if pending.update(&options) {
+            glib::g_warning!(
+                "tty-rex",
+                "Both maximize and fullscreen specified, preferring fullscreen"
+            );
+        }
+        self.window_state.set(pending);
 
         // Restore first so the session is not lost when tty-rex closes
         // again, whatever the options; a standalone instance only restores
@@ -874,6 +904,7 @@ impl App {
                 command,
                 cwd_uri,
                 title,
+                applies_window_state,
             } => {
                 let request = TabRequest {
                     profile_uuid,
@@ -914,6 +945,9 @@ impl App {
                     && request.profile_uuid.is_none();
                 let window = window.unwrap_or_else(|| self.launch_window(single_terminal));
                 window.sender.emit(WindowInput::AddTab(Box::new(request)));
+                if applies_window_state {
+                    self.maybe_maximize_or_fullscreen(&window.window);
+                }
                 window.window.present();
             }
         }

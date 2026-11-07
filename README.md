@@ -25,8 +25,8 @@ Settings Ptyxis has no key for live in tty-rex's own
 
 tty-rex understands `--tab`, `--new-window`, `--tab-with-profile`,
 `-x`/`--execute` (and `--`), `-d`/`--working-directory`, `-T`/`--title`,
-`-s`/`--standalone`, `--preferences` and `--import-palette FILE` with the
-same meaning as in Ptyxis; `cargo run -- --help` lists them.
+`-s`/`--standalone`, `--preferences`, `--maximize`, `--fullscreen` and
+`--import-palette FILE` with the same meaning as in Ptyxis; `cargo run -- --help` lists them.
 
 Like Ptyxis, tty-rex implements the `org.freedesktop.Terminal1` D-Bus
 interface, which file managers use for "Open in Terminal" and
