@@ -313,6 +313,40 @@ pub fn connect_commit_bytes(
     })
 }
 
+/// Whether the clipboard holds text to paste
+/// (`ptyxis_terminal_can_paste()`).
+pub fn can_paste(terminal: &vte::Terminal) -> bool {
+    terminal
+        .clipboard()
+        .formats()
+        .contains_type(glib::Type::STRING)
+}
+
+/// Pastes the clipboard, then follows it to the bottom of the scrollback
+/// when the profile scrolls on keystrokes (`ptyxis_terminal_paste()`).
+pub fn paste(terminal: &vte::Terminal) {
+    terminal.paste_clipboard();
+    if terminal.is_scroll_on_keystroke() {
+        scroll_to_bottom(terminal);
+    }
+}
+
+/// Scrolls the enclosing scrolled window to the end of the scrollback
+/// (`ptyxis_terminal_scroll_to_bottom()`).
+fn scroll_to_bottom(terminal: &vte::Terminal) {
+    let Some(scroller) = terminal
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .and_downcast::<gtk::ScrolledWindow>()
+    else {
+        return;
+    };
+    let adjustment = scroller.vadjustment();
+    let bottom = adjustment.upper() - adjustment.page_size();
+    if bottom > adjustment.value() {
+        adjustment.set_value(bottom);
+    }
+}
+
 /// The terminal's grid size in (columns, rows), as Ptyxis reads it with
 /// `vte_terminal_get_column_count()` and `vte_terminal_get_row_count()`.
 pub fn grid_size(terminal: &vte::Terminal) -> Option<(u32, u32)> {
