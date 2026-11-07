@@ -205,7 +205,7 @@ impl Inspector {
         let palette = palette::lookup_or_default(&self.profile.palette_id());
         let dark = adw::StyleManager::default().is_dark();
         for swatch in &self.swatches {
-            swatch.set_palette(palette.as_ref(), dark);
+            swatch.set_palette(palette.as_deref(), dark);
         }
     }
 

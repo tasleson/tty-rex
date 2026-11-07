@@ -31,6 +31,8 @@ mod custom_links;
 mod profile_editor;
 mod widgets;
 
+use std::rc::Rc;
+
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use relm4::prelude::*;
@@ -310,7 +312,7 @@ impl Preferences {
 /// A palette preview inside a toggle button bound to the default
 /// profile's `palette` action (`create_palette_preview()`).
 fn palette_card(
-    palette: &Palette,
+    palette: &Rc<Palette>,
     dark: bool,
     font: &pango::FontDescription,
 ) -> (gtk::FlowBoxChild, PalettePreview, gtk::ToggleButton) {

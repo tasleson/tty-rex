@@ -23,9 +23,12 @@
 //! A palette either has `[Light]` and `[Dark]` groups, or puts a single
 //! face directly in `[Palette]`, in which case it is used for both.
 
+use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::SystemTime;
 
 use gtk::{gdk, glib};
 
@@ -475,22 +478,68 @@ pub fn user_palettes_dirs(data_dir: &Path, app_id: &str) -> Vec<PathBuf> {
     dirs
 }
 
-fn lookup_user(id: &str) -> Option<Palette> {
+/// A user palette file as last parsed, to tell whether it changed.
+struct CachedUserPalette {
+    modified: Option<SystemTime>,
+    len: u64,
+    palette: Rc<Palette>,
+}
+
+/// Loads the user palette `id` from `path`, reparsing only when the file
+/// changed since the last load. A missing or unreadable file is `Ok(None)`.
+fn load_user_palette(id: &str, path: &Path) -> Result<Option<Rc<Palette>>, String> {
+    thread_local! {
+        static CACHE: RefCell<HashMap<PathBuf, CachedUserPalette>> = RefCell::default();
+    }
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        CACHE.with_borrow_mut(|cache| cache.remove(path));
+        return Ok(None);
+    };
+    let (modified, len) = (meta.modified().ok(), meta.len());
+    let hit = CACHE.with_borrow(|cache| {
+        cache
+            .get(path)
+            .filter(|c| c.modified.is_some() && c.modified == modified && c.len == len)
+            .map(|c| Rc::clone(&c.palette))
+    });
+    if hit.is_some() {
+        return Ok(hit);
+    }
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    let palette =
+        Rc::new(Palette::parse(id, &path.display().to_string(), &data).map_err(|e| e.to_string())?);
+    CACHE.with_borrow_mut(|cache| {
+        cache.insert(
+            path.to_owned(),
+            CachedUserPalette {
+                modified,
+                len,
+                palette: Rc::clone(&palette),
+            },
+        )
+    });
+    Ok(Some(palette))
+}
+
+fn lookup_user(id: &str) -> Option<Rc<Palette>> {
     user_palettes_dirs(&glib::user_data_dir(), config::APP_ID)
         .into_iter()
         .find_map(|dir| {
             let path = dir.join(format!("{id}{PALETTE_SUFFIX}"));
-            let data = std::fs::read_to_string(&path).ok()?;
-            Palette::parse(id, &path.display().to_string(), &data)
+            load_user_palette(id, &path)
                 .inspect_err(|e| glib::g_warning!("tty-rex", "Ignoring user palette: {e}"))
                 .ok()
+                .flatten()
         })
 }
 
-fn lookup_builtin(id: &str) -> Option<Palette> {
+fn lookup_builtin(id: &str) -> Option<Rc<Palette>> {
     // Bundled palettes never change, so parse each at most once.
     thread_local! {
-        static CACHE: RefCell<HashMap<&'static str, Palette>> = RefCell::default();
+        static CACHE: RefCell<HashMap<&'static str, Rc<Palette>>> = RefCell::default();
     }
 
     let (builtin_id, data) = BUILTIN_PALETTES
@@ -499,17 +548,19 @@ fn lookup_builtin(id: &str) -> Option<Palette> {
     if let Some(palette) = CACHE.with_borrow(|cache| cache.get(builtin_id).cloned()) {
         return Some(palette);
     }
-    let palette = Palette::parse(id, id, data)
-        .inspect_err(|e| glib::g_critical!("tty-rex", "Bundled palette is invalid: {e}"))
-        .ok()?;
-    CACHE.with_borrow_mut(|cache| cache.insert(builtin_id, palette.clone()));
+    let palette = Rc::new(
+        Palette::parse(id, id, data)
+            .inspect_err(|e| glib::g_critical!("tty-rex", "Bundled palette is invalid: {e}"))
+            .ok()?,
+    );
+    CACHE.with_borrow_mut(|cache| cache.insert(builtin_id, Rc::clone(&palette)));
     Some(palette)
 }
 
 /// User palettes from every directory; an id found in an earlier (more
 /// specific) directory hides the same id in later ones, as lookups do.
-fn user_palettes() -> Vec<Palette> {
-    let mut palettes: Vec<Palette> = Vec::new();
+fn user_palettes() -> Vec<Rc<Palette>> {
+    let mut palettes: Vec<Rc<Palette>> = Vec::new();
     for dir in user_palettes_dirs(&glib::user_data_dir(), config::APP_ID) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -522,13 +573,8 @@ fn user_palettes() -> Vec<Palette> {
             else {
                 continue;
             };
-            match std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|data| {
-                    Palette::parse(id, &path.display().to_string(), &data)
-                        .map_err(|e| e.to_string())
-                }) {
-                Ok(palette) if !palettes.iter().any(|p| p.id() == palette.id()) => {
+            match load_user_palette(id, &path) {
+                Ok(Some(palette)) if !palettes.iter().any(|p| p.id() == palette.id()) => {
                     palettes.push(palette)
                 }
                 Ok(_) => {}
@@ -541,14 +587,14 @@ fn user_palettes() -> Vec<Palette> {
 
 /// Sorts palettes by name the way the C list model's string sorter does
 /// (case-insensitively).
-pub fn sort_by_name(palettes: &mut [Palette]) {
-    palettes.sort_by_cached_key(|p| p.name().to_lowercase());
+pub fn sort_by_name<P: Borrow<Palette>>(palettes: &mut [P]) {
+    palettes.sort_by_cached_key(|p| p.borrow().name().to_lowercase());
 }
 
 /// Every bundled and user palette, sorted by name, as
 /// `ptyxis_palette_get_all()` lists them.
-pub fn all() -> Vec<Palette> {
-    let mut palettes: Vec<Palette> = BUILTIN_PALETTES
+pub fn all() -> Vec<Rc<Palette>> {
+    let mut palettes: Vec<Rc<Palette>> = BUILTIN_PALETTES
         .iter()
         .filter_map(|(id, _)| lookup_builtin(id))
         .chain(user_palettes())
@@ -618,7 +664,7 @@ pub fn import(source: &Path, dest_dir: &Path) -> Result<PathBuf, ImportError> {
 }
 
 /// Looks up a palette by id, preferring user palettes like the C version.
-pub fn lookup(id: &str) -> Option<Palette> {
+pub fn lookup(id: &str) -> Option<Rc<Palette>> {
     if id.is_empty() || id.contains('/') {
         return None;
     }
@@ -626,7 +672,7 @@ pub fn lookup(id: &str) -> Option<Palette> {
 }
 
 /// Looks up `id`, falling back to the default palette.
-pub fn lookup_or_default(id: &str) -> Option<Palette> {
+pub fn lookup_or_default(id: &str) -> Option<Rc<Palette>> {
     lookup(id).or_else(|| lookup_builtin(DEFAULT_PALETTE_ID))
 }
 
@@ -775,7 +821,7 @@ mod tests {
 
     #[test]
     fn listing_is_sorted_case_insensitively() {
-        let mut palettes: Vec<Palette> = ["tango", "3024", "Aci", "gnome"]
+        let mut palettes: Vec<Rc<Palette>> = ["tango", "3024", "Aci", "gnome"]
             .iter()
             .map(|id| lookup_builtin(id).unwrap())
             .collect();
@@ -800,7 +846,29 @@ mod tests {
     fn builtin_lookups_are_cached_copies() {
         let first = lookup_builtin(DEFAULT_PALETTE_ID).unwrap();
         let second = lookup_builtin(DEFAULT_PALETTE_ID).unwrap();
-        assert_eq!(first, second);
+        assert!(Rc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn user_palette_is_reloaded_when_the_file_changes() {
+        let dir =
+            std::env::temp_dir().join(format!("tty-rex-palette-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Cached.palette");
+        let write = |name: &str| {
+            std::fs::write(&path, format!("[Palette]\nName={name}\n{MINIMAL_COLORS}")).unwrap()
+        };
+        write("One");
+        let first = load_user_palette("Cached", &path).unwrap().unwrap();
+        let again = load_user_palette("Cached", &path).unwrap().unwrap();
+        assert!(Rc::ptr_eq(&first, &again));
+        // A different length is enough to tell the file changed.
+        write("Second");
+        let changed = load_user_palette("Cached", &path).unwrap().unwrap();
+        assert_eq!(changed.name(), "Second");
+        std::fs::remove_file(&path).unwrap();
+        assert!(load_user_palette("Cached", &path).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn rgba(color: &str) -> gdk::RGBA {

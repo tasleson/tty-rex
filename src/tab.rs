@@ -880,6 +880,26 @@ impl Tab {
         let Some(palette) = palette::lookup_or_default(&palette_id) else {
             return;
         };
+        self.restyle(&palette);
+    }
+
+    /// Applies the profile's palette to the terminal and restyles the
+    /// window, resolving the palette once for both.
+    fn update_palette_and_dressing(&mut self) {
+        let palette_id = self.profile.palette_id();
+        let Some(palette) = palette::lookup_or_default(&palette_id) else {
+            glib::g_warning!("tty-rex", "No palette available for “{palette_id}”");
+            return;
+        };
+        terminal::apply_palette(
+            &self.terminal,
+            &palette,
+            adw::StyleManager::default().is_dark(),
+        );
+        self.restyle(&palette);
+    }
+
+    fn restyle(&mut self, palette: &palette::Palette) {
         let dark = adw::StyleManager::default().is_dark();
         self.dressing.update(&DressingStyle {
             face: palette.face(dark),
@@ -1468,8 +1488,7 @@ impl Component for Tab {
                 self.links
                     .update(&self.terminal, &self.profile.custom_links());
                 terminal::apply_profile(&self.terminal, &self.profile);
-                terminal::apply_profile_palette(&self.terminal, &self.profile);
-                self.update_dressing();
+                self.update_palette_and_dressing();
                 invalidate_thumbnail(root);
             }
             TabInput::ShowProfileDialog(profiles) => {
@@ -1512,13 +1531,11 @@ impl Component for Tab {
                 self.links
                     .update(&self.terminal, &self.profile.custom_links());
                 terminal::apply_profile(&self.terminal, &self.profile);
-                terminal::apply_profile_palette(&self.terminal, &self.profile);
-                self.update_dressing();
+                self.update_palette_and_dressing();
                 invalidate_thumbnail(root);
             }
             TabInput::AppearanceChanged => {
-                terminal::apply_profile_palette(&self.terminal, &self.profile);
-                self.update_dressing();
+                self.update_palette_and_dressing();
                 invalidate_thumbnail(root);
             }
             TabInput::Bell => {

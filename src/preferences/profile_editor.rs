@@ -282,7 +282,7 @@ fn bind_containers(settings: &gio::Settings, row: &adw::ComboRow, containers: &C
 /// Offers every palette in the profile's palette combo row.
 fn bind_palettes(settings: &gio::Settings, row: &adw::ComboRow) {
     let palettes = palette::all();
-    let titles: Vec<&str> = palettes.iter().map(palette::Palette::name).collect();
+    let titles: Vec<&str> = palettes.iter().map(|p| p.name()).collect();
     widgets::bind_values(
         settings,
         key::PALETTE,

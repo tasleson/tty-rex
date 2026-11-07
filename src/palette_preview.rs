@@ -104,12 +104,12 @@ pub struct PalettePreview {
     background_area: gtk::DrawingArea,
     label: gtk::Label,
     swatches: Vec<ColorSwatch>,
-    palette: Palette,
+    palette: Rc<Palette>,
     font: Rc<RefCell<Option<pango::FontDescription>>>,
 }
 
 impl PalettePreview {
-    pub fn new(palette: &Palette, dark: bool, font: Option<&pango::FontDescription>) -> Self {
+    pub fn new(palette: &Rc<Palette>, dark: bool, font: Option<&pango::FontDescription>) -> Self {
         let (background_area, background) = color_area(PREVIEW_CSS_NAME);
         let root = gtk::Overlay::builder()
             .css_name(PREVIEW_CSS_NAME)
@@ -171,7 +171,7 @@ impl PalettePreview {
             background_area,
             label,
             swatches,
-            palette: palette.clone(),
+            palette: Rc::clone(palette),
             font: Rc::new(RefCell::new(font.cloned())),
         };
         preview.set_dark(dark);
