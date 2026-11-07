@@ -1253,6 +1253,9 @@ impl Component for Window {
                 child,
                 transferring,
             } => {
+                if let Some(tab) = self.app.tab(&child) {
+                    tab.sender.emit(TabInput::Detached);
+                }
                 if !transferring {
                     self.park_tab(child);
                     self.close_if_empty();

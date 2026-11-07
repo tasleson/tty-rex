@@ -297,8 +297,6 @@ impl LeaderMonitor {
     }
 }
 
-/// The terminal context menu: the items of `src/ptyxis-terminal.ui` whose
-/// actions the port implements, plus tty-rex's telemetry toggle.
 /// What the last check found in the foreground, as far as logout
 /// inhibition cares (`has_foreground_process` and `program_name`).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -358,6 +356,8 @@ impl Drop for LogoutInhibit {
     }
 }
 
+/// The terminal context menu: the items of `src/ptyxis-terminal.ui` whose
+/// actions the port implements, plus tty-rex's telemetry toggle.
 fn context_menu() -> gio::Menu {
     let menu = gio::Menu::new();
     let section = gio::Menu::new();
@@ -496,6 +496,11 @@ pub enum TabInput {
     ResetColor,
     /// The tab left its window, e.g. to move to another one.
     Unrealized,
+    /// The tab's page was taken out of its tab view, to be closed (and
+    /// parked) or moved to another window. Unlike [`TabInput::Unrealized`]
+    /// this also covers a background tab that was never shown, so it
+    /// stands in for `ptyxis_tab_unroot()`.
+    Detached,
     /// The tab was reopened after being closed (`win.undo-close-tab`).
     Restored,
     /// End the program because the user confirmed closing the tab
@@ -1212,6 +1217,8 @@ impl Component for Tab {
                     dialog.force_close();
                 }
                 self.cancel_color_dialog();
+            }
+            TabInput::Detached => {
                 // Like ptyxis_tab_unroot(), the inhibition was made for the
                 // old window. It is not taken again until the foreground
                 // program changes.
