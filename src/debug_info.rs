@@ -40,7 +40,7 @@ pub const OS_RELEASE_PATH: &str = "/etc/os-release";
 pub const HOST_OS_RELEASE_PATH: &str = "/var/run/host/etc/os-release";
 
 /// How glibc's `printf()` shows a `NULL` string, which Ptyxis prints for an
-/// unknown operating system name or GTK theme.
+/// unknown GTK theme.
 const NULL_STRING: &str = "(null)";
 /// Where the operating system name sits in `os-release`.
 const OS_NAME_PREFIX: &str = "NAME=\"";
@@ -142,7 +142,9 @@ impl DebugInfo {
         );
         s.push('\n');
 
-        let os_name = self.os_name.as_deref().unwrap_or(NULL_STRING);
+        // Ptyxis reads the name from the agent's `OsName` D-Bus property,
+        // which GDBus sends as "" while the agent has not set it.
+        let os_name = self.os_name.as_deref().unwrap_or_default();
         let _ = writeln!(s, "Operating System: {os_name}");
         s.push('\n');
 
@@ -517,7 +519,7 @@ NAME=\"Fedora Linux\"
         };
         let text = info.render();
         let expected_lines = [
-            "Operating System: (null)\n\n\nAgent: none, spawning directly in sandbox\n",
+            "Operating System: \n\n\nAgent: none, spawning directly in sandbox\n",
             "Desktop Session: Unspecified\n",
             "Accessibility: No\n",
             "GTK Theme: (null)\n",
