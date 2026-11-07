@@ -510,9 +510,7 @@ fn inherited_request(
         request.profile_uuid = request.profile_uuid.or(Some(active.profile_uuid.clone()));
         request.previous_cwd_uri = terminal::current_directory_uri(&active.terminal);
         request.zoom = active.zoom.get();
-        request.grid_size = u32::try_from(active.terminal.column_count())
-            .ok()
-            .zip(u32::try_from(active.terminal.row_count()).ok());
+        request.grid_size = terminal::grid_size(&active.terminal);
         if app.preserves_container(request.profile_uuid.as_deref()) {
             request.container = current_container(app, &active);
         }

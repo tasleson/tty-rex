@@ -259,6 +259,18 @@ pub fn connect_shell_precmd(
     terminal.connect_termprop_changed(Some(TERMPROP_SHELL_PRECMD), move |terminal, _| f(terminal))
 }
 
+/// The terminal's grid size in (columns, rows), as Ptyxis reads it with
+/// `vte_terminal_get_column_count()` and `vte_terminal_get_row_count()`.
+pub fn grid_size(terminal: &vte::Terminal) -> Option<(u32, u32)> {
+    grid_size_from_counts(terminal.column_count(), terminal.row_count())
+}
+
+/// VTE reports the counts as `glong`; anything that is not a valid `guint`
+/// means there is no usable size.
+fn grid_size_from_counts(columns: i64, rows: i64) -> Option<(u32, u32)> {
+    u32::try_from(columns).ok().zip(u32::try_from(rows).ok())
+}
+
 /// Collapses a directory URI for display, replacing `$HOME` with `~`
 /// like `ptyxis_path_collapse()`. Non-local URIs are shown verbatim.
 pub fn collapse_uri(uri: &str, home: &str) -> String {
@@ -280,6 +292,24 @@ pub fn collapse_uri(uri: &str, home: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grid_size_from_vte_counts() {
+        let cases = [
+            ((80, 24), Some((80, 24))),
+            ((0, 0), Some((0, 0))),
+            ((-1, 24), None),
+            ((80, -1), None),
+            ((i64::from(u32::MAX) + 1, 24), None),
+        ];
+        for ((columns, rows), expected) in cases {
+            assert_eq!(
+                grid_size_from_counts(columns, rows),
+                expected,
+                "{columns}x{rows}"
+            );
+        }
+    }
 
     #[test]
     fn zoom_scales_match_c_table() {

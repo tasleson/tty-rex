@@ -700,9 +700,7 @@ impl App {
         Some(SessionTab {
             profile: Some(handle.profile_uuid.borrow().clone()),
             pinned: page.is_pinned(),
-            size: u32::try_from(terminal.column_count())
-                .ok()
-                .zip(u32::try_from(terminal.row_count()).ok()),
+            size: terminal::grid_size(terminal),
             zoom: handle.zoom.get(),
             active,
             // Before the program sets a title, keep the restored one.
