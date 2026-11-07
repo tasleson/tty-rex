@@ -1157,7 +1157,7 @@ impl Tab {
         let exited = sender.input_sender().clone();
         self.spawner.spawn(
             &self.terminal,
-            &request,
+            request,
             Box::new(move |result| spawned.emit(TabInput::Spawned(result))),
             Box::new(move |exit| exited.emit(TabInput::Exited(exit))),
         );

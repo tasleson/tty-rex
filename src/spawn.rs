@@ -144,13 +144,18 @@ pub fn is_shell_in(arg0: &str, configured_shells: &[String]) -> bool {
 /// Whether `arg0` names a shell on the host (`ptyxis_is_shell()`), reading
 /// `/etc/shells` once like the C function.
 pub fn is_shell(arg0: &str) -> bool {
+    is_shell_in(arg0, configured_shells())
+}
+
+/// The shells `/etc/shells` lists, read once and shared by [`is_shell`]
+/// and the shell discovery.
+fn configured_shells() -> &'static [String] {
     static CONFIGURED_SHELLS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let configured = CONFIGURED_SHELLS.get_or_init(|| {
+    CONFIGURED_SHELLS.get_or_init(|| {
         std::fs::read_to_string(ETC_SHELLS)
             .map(|contents| parse_etc_shells(&contents))
             .unwrap_or_default()
-    });
-    is_shell_in(arg0, configured)
+    })
 }
 
 /// Parses `/etc/shells`, skipping blank lines and comments.
@@ -183,42 +188,44 @@ pub fn path_from_uri(uri: &str) -> Option<String> {
 /// decides whether a program is a shell (and thus safe to start in an
 /// inherited directory).
 pub fn build_plan(
-    request: &SpawnRequest,
+    request: SpawnRequest,
     default_shell: Option<&str>,
     is_shell: impl Fn(&str) -> bool,
 ) -> Result<SpawnPlan, SpawnError> {
     let mut preserve_directory_safe = false;
-    let explicit_command = request.command.as_ref().filter(|argv| !argv.is_empty());
+    let explicit_command = request.command.filter(|argv| !argv.is_empty());
+    let has_explicit_command = explicit_command.is_some();
 
-    let (mut argv, arg0) = if let Some(command) = explicit_command {
-        (command.clone(), None)
-    } else if let Some(custom) = &request.custom_command {
+    // Whether the first argument is a program to test for being a shell.
+    let (mut argv, has_arg0) = if let Some(command) = explicit_command {
+        (command, false)
+    } else if let Some(custom) = request.custom_command {
         let argv: Vec<String> = glib::shell_parse_argv(custom.as_str())
             .map_err(|source| SpawnError::InvalidCustomCommand {
-                command: custom.clone(),
+                command: custom,
                 source,
             })?
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        let arg0 = argv.first().cloned();
-        (argv, arg0)
+        let has_arg0 = !argv.is_empty();
+        (argv, has_arg0)
     } else if let Some(shell) = default_shell.filter(|s| !s.is_empty()) {
-        (vec![shell.to_owned()], Some(shell.to_owned()))
+        (vec![shell.to_owned()], true)
     } else {
         preserve_directory_safe = true;
-        (FALLBACK_SHELL_ARGV.map(str::to_owned).to_vec(), None)
+        (Vec::from(FALLBACK_SHELL_ARGV.map(str::to_owned)), false)
     };
 
-    if let Some(arg0) = &arg0 {
-        preserve_directory_safe |= is_shell(arg0);
-        if request.login_shell && shell_supports_dash_l(arg0) {
+    if has_arg0 {
+        preserve_directory_safe |= is_shell(&argv[0]);
+        if request.login_shell && shell_supports_dash_l(&argv[0]) {
             argv.push(LOGIN_FLAG.to_owned());
         }
     }
 
     let requested_path = request.cwd_uri.as_deref().and_then(path_from_uri);
-    let cwd = if explicit_command.is_some() && requested_path.is_some() {
+    let cwd = if has_explicit_command && requested_path.is_some() {
         requested_path
     } else {
         match request.preserve_directory {
@@ -241,7 +248,7 @@ pub trait Spawner {
     fn spawn(
         &self,
         terminal: &vte::Terminal,
-        request: &SpawnRequest,
+        request: SpawnRequest,
         on_spawned: SpawnCallback,
         on_exit: ExitCallback,
     );
@@ -267,7 +274,7 @@ fn is_executable(path: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 struct HostShellInfo {
     user_shell: Option<String>,
-    configured_shells: Vec<String>,
+    configured_shells: &'static [String],
 }
 
 /// Discovers the user's login shell like the agent does: the passwd
@@ -294,20 +301,18 @@ fn discover_user_shell() -> Option<String> {
 fn discover_host_shell_info() -> HostShellInfo {
     HostShellInfo {
         user_shell: discover_user_shell(),
-        configured_shells: std::fs::read_to_string(ETC_SHELLS)
-            .map(|contents| parse_etc_shells(&contents))
-            .unwrap_or_default(),
+        configured_shells: configured_shells(),
     }
 }
 
 /// Returns the cached host shell info, discovering it on a worker thread
 /// the first time. Concurrent first calls may each discover; that is
 /// harmless and rare.
-async fn host_shell_info() -> HostShellInfo {
+async fn host_shell_info() -> Rc<HostShellInfo> {
     thread_local! {
-        static INFO: OnceCell<HostShellInfo> = const { OnceCell::new() };
+        static INFO: OnceCell<Rc<HostShellInfo>> = const { OnceCell::new() };
     }
-    if let Some(info) = INFO.with(|cell| cell.get().cloned()) {
+    if let Some(info) = INFO.with(|cell| cell.get().map(Rc::clone)) {
         return info;
     }
     let info = gio::spawn_blocking(discover_host_shell_info)
@@ -316,7 +321,7 @@ async fn host_shell_info() -> HostShellInfo {
             glib::g_warning!("tty-rex", "Shell discovery failed; using fallback shell");
             HostShellInfo::default()
         });
-    INFO.with(|cell| cell.get_or_init(|| info).clone())
+    INFO.with(|cell| Rc::clone(cell.get_or_init(|| Rc::new(info))))
 }
 
 fn vte_version_number() -> u32 {
@@ -391,12 +396,11 @@ impl Spawner for HostSpawner {
     fn spawn(
         &self,
         terminal: &vte::Terminal,
-        request: &SpawnRequest,
+        request: SpawnRequest,
         on_spawned: SpawnCallback,
         on_exit: ExitCallback,
     ) {
         let weak_terminal = terminal.downgrade();
-        let request = request.clone();
         glib::spawn_future_local(async move {
             let info = host_shell_info().await;
             let prepared = if request.container.is_session() {
@@ -411,7 +415,7 @@ impl Spawner for HostSpawner {
             match prepared {
                 Ok(prepared) => spawn_on_host(
                     &terminal,
-                    &request,
+                    request,
                     &info,
                     prepared.as_ref(),
                     on_spawned,
@@ -448,7 +452,7 @@ fn home_dir() -> Option<String> {
 /// session.
 fn spawn_on_host(
     terminal: &vte::Terminal,
-    request: &SpawnRequest,
+    mut request: SpawnRequest,
     info: &HostShellInfo,
     prepared: Option<&container::Prepared>,
     on_spawned: SpawnCallback,
@@ -460,8 +464,10 @@ fn spawn_on_host(
         Some(prepared) => prepared.shell.as_deref(),
         None => info.user_shell.as_deref(),
     };
+    let mut env = spawn_environment(&request);
+    let container = std::mem::take(&mut request.container);
     let plan = match build_plan(request, default_shell, |arg0| {
-        is_shell_in(arg0, &info.configured_shells)
+        is_shell_in(arg0, info.configured_shells)
     }) {
         Ok(plan) => plan,
         Err(e) => {
@@ -470,7 +476,6 @@ fn spawn_on_host(
         }
     };
 
-    let mut env = spawn_environment(request);
     let (argv, cwd) = match prepared {
         None => (plan.argv, plan.cwd),
         Some(prepared) => {
@@ -485,7 +490,7 @@ fn spawn_on_host(
                 container::with_minimal_environment(&env, |key| std::env::var(key).ok());
             let user = glib::user_name();
             let exec = container::exec_plan(
-                &request.container,
+                &container,
                 &plan.argv,
                 &env_in_container,
                 &ExecContext {
@@ -627,7 +632,7 @@ mod tests {
             },
         ];
         for case in cases {
-            let plan = build_plan(&case.request, case.default_shell, always_shell)
+            let plan = build_plan(case.request, case.default_shell, always_shell)
                 .unwrap_or_else(|e| panic!("{}: {e}", case.name));
             assert_eq!(plan.argv, case.expected, "{}", case.name);
         }
@@ -639,7 +644,7 @@ mod tests {
             custom_command: Some("echo 'unterminated".into()),
             ..Default::default()
         };
-        let err = build_plan(&request, None, always_shell).unwrap_err();
+        let err = build_plan(request, None, always_shell).unwrap_err();
         assert!(err.to_string().contains("echo 'unterminated"), "{err}");
     }
 
@@ -694,7 +699,7 @@ mod tests {
                 ..Default::default()
             };
             let is_shell = if shell { always_shell } else { never_shell };
-            let plan = build_plan(&request, Some("/bin/bash"), is_shell).unwrap();
+            let plan = build_plan(request, Some("/bin/bash"), is_shell).unwrap();
             assert_eq!(plan.cwd, expected, "{name}");
         }
     }
@@ -705,7 +710,7 @@ mod tests {
             cwd_uri: Some("file:///tmp".into()),
             ..Default::default()
         };
-        let plan = build_plan(&request, None, never_shell).unwrap();
+        let plan = build_plan(request, None, never_shell).unwrap();
         assert_eq!(plan.cwd.as_deref(), Some("/tmp"));
     }
 
