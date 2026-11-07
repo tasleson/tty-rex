@@ -173,9 +173,13 @@ fn read_cmdline(proc_dir: &Path, pid: i32) -> Option<String> {
 /// `child_pid`, the program the tab started (`has_foreground_process()` in
 /// `agent/ptyxis-process-impl.c`). A tab without a child has none.
 pub fn foreground_process(pty: BorrowedFd<'_>, child_pid: Option<i32>) -> Option<Foreground> {
-    let child_pid = child_pid?;
-    let pgrp = foreground_pgrp(pty)?;
-    (pgrp != child_pid).then(|| Foreground {
+    foreground_of(foreground_pgrp(pty)?, child_pid)
+}
+
+/// What [`foreground_process`] reports once the foreground process group
+/// `pgrp` is known, for callers that already looked it up.
+pub fn foreground_of(pgrp: i32, child_pid: Option<i32>) -> Option<Foreground> {
+    (pgrp != child_pid?).then(|| Foreground {
         pid: pgrp,
         cmdline: read_cmdline(Path::new(PROC_DIR), pgrp),
     })
@@ -293,6 +297,20 @@ mod tests {
         assert_eq!(foreground_pgrp(file.as_fd()), None);
         assert_eq!(foreground_leader(file.as_fd()), None);
         assert_eq!(foreground_process(file.as_fd(), Some(1)), None);
+    }
+
+    #[test]
+    fn foreground_of_child() {
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let cases = [(None, false), (Some(pid), false), (Some(pid + 1), true)];
+        for (child_pid, expected) in cases {
+            let foreground = foreground_of(pid, child_pid);
+            assert_eq!(foreground.is_some(), expected, "{child_pid:?}");
+            if let Some(foreground) = foreground {
+                assert_eq!(foreground.pid, pid);
+                assert!(foreground.cmdline.is_some());
+            }
+        }
     }
 
     #[test]

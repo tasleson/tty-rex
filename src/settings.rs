@@ -45,6 +45,7 @@ pub mod key {
     pub const ENABLE_A11Y: &str = "enable-a11y";
     pub const FONT_NAME: &str = "font-name";
     pub const IGNORE_OSC_TITLE: &str = "ignore-osc-title";
+    pub const INHIBIT_LOGOUT: &str = "inhibit-logout";
     pub const INTERFACE_STYLE: &str = "interface-style";
     pub const NEW_TAB_POSITION: &str = "new-tab-position";
     pub const PROFILE_UUIDS: &str = "profile-uuids";
@@ -70,6 +71,7 @@ pub mod key {
         ENABLE_A11Y,
         FONT_NAME,
         IGNORE_OSC_TITLE,
+        INHIBIT_LOGOUT,
         INTERFACE_STYLE,
         NEW_TAB_POSITION,
         PROFILE_UUIDS,
@@ -524,6 +526,12 @@ impl AppSettings {
     /// first (`ptyxis_settings_get_prompt_on_close()`).
     pub fn prompt_on_close(&self) -> bool {
         self.settings.boolean(key::PROMPT_ON_CLOSE)
+    }
+
+    /// Whether a tab running a program other than a shell asks the session
+    /// to hold off logging out (`ptyxis_settings_get_inhibit_logout()`).
+    pub fn inhibit_logout(&self) -> bool {
+        self.settings.boolean(key::INHIBIT_LOGOUT)
     }
 
     pub fn restore_window_size(&self) -> bool {
