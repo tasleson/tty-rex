@@ -415,12 +415,13 @@ impl Window {
     }
 
     /// Keeps a closed tab alive for a few seconds so it can be reopened
-    /// (`ptyxis_window_close_page_cb()`). A command window has no
-    /// `win.undo-close-tab`, and tabs of a window that is closing as a whole
-    /// were released already. Tabs closed while the window asks whether to
-    /// close the rest are parked, so they come back if the user cancels.
+    /// (`ptyxis_window_close_page_cb()`). Tabs of a window that is closing
+    /// as a whole were released already. Tabs closed while the window asks
+    /// whether to close the rest are parked, so they come back if the user
+    /// cancels. Like Ptyxis, a command window parks its tabs too even though
+    /// it has no `win.undo-close-tab`, so they live out the same timeout.
     fn park_tab(&self, child: gtk::Widget) {
-        if !self.kind.has_tab_actions() || self.app.tab(&child).is_none() {
+        if self.app.tab(&child).is_none() {
             self.app.remove_tab(&child);
             return;
         }
