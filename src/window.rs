@@ -267,8 +267,8 @@ pub struct Window {
     /// Disabled without a selection so the shortcut reaches the terminal.
     copy_action: gio::SimpleAction,
     /// `win.zoom-in`, `win.zoom-out` and `win.zoom-one`, enabled as the
-    /// selected tab's zoom allows.
-    zoom_actions: ZoomActions,
+    /// selected tab's zoom allows, and the primary menu's zoom label.
+    zoom_controls: ZoomControls,
     /// Follows the selected page's `pinned` property so the tab menu only
     /// shows the applicable one.
     _pinned_signals: glib::SignalGroup,
@@ -298,19 +298,26 @@ pub struct Window {
     fullscreen_box: FullscreenBox,
 }
 
-/// The zoom actions, whose sensitivity follows the selected tab's zoom.
+/// The zoom actions, whose sensitivity follows the selected tab's zoom,
+/// and the primary menu's reset button showing that zoom.
 #[derive(Clone)]
-struct ZoomActions {
+struct ZoomControls {
     zoom_in: gio::SimpleAction,
     zoom_out: gio::SimpleAction,
     zoom_one: gio::SimpleAction,
+    label: gtk::Button,
 }
 
-impl ZoomActions {
+impl ZoomControls {
     /// Enables each action that applies at `zoom`, or none without a tab
     /// (`ptyxis_window_notify_zoom_cb()` and
-    /// `ptyxis_window_page_changed_cb()`).
+    /// `ptyxis_window_page_changed_cb()`). The label follows the tab's
+    /// `zoom-label` and, as with Ptyxis's binding group, keeps its last
+    /// text when there is no tab.
     fn update(&self, zoom: Option<ZoomLevel>) {
+        if let Some(zoom) = zoom {
+            self.label.set_label(&zoom.label());
+        }
         self.zoom_in
             .set_enabled(zoom.is_some_and(ZoomLevel::can_zoom_in));
         self.zoom_out
@@ -508,7 +515,7 @@ impl Window {
             tab.as_ref().map(|t| Rc::clone(&t.child_pid)),
         ));
         let Some(page) = page else {
-            self.zoom_actions.update(None);
+            self.zoom_controls.update(None);
             self.find_bar_revealer.set_reveal_child(false);
             self.window_title.set_title(config::APP_NAME);
             self.window_title.set_subtitle("");
@@ -549,12 +556,12 @@ impl Window {
             terminal::connect_commit_bytes(&tab.terminal, move || fullscreen_box.unreveal());
         // The tab sets its zoom before the font scale, so the notify sees
         // the new level (the tab's `notify::zoom` in Ptyxis).
-        let zoom_actions = self.zoom_actions.clone();
+        let zoom_controls = self.zoom_controls.clone();
         let zoom = Rc::clone(&tab.zoom);
-        zoom_actions.update(Some(zoom.get()));
+        zoom_controls.update(Some(zoom.get()));
         let zoom_id = tab
             .terminal
-            .connect_font_scale_notify(move |_| zoom_actions.update(Some(zoom.get())));
+            .connect_font_scale_notify(move |_| zoom_controls.update(Some(zoom.get())));
         self.terminal_handlers = Some((
             tab.terminal.clone(),
             vec![cwd_id, selection_id, bell_id, commit_id, zoom_id],
@@ -694,6 +701,61 @@ fn add_theme_controls(
     if let Some(popover) = menu_button.popover().and_downcast::<gtk::PopoverMenu>() {
         popover.add_child(&theme_selector(&action_name), INTERFACE_STYLE_ITEM);
     }
+}
+
+/// A flat, circular zoom button with a 16 px icon, as in
+/// `ptyxis_window_add_zoom_controls()`.
+fn zoom_icon_button(action_name: &str, icon_name: &str, tooltip: &str, label: &str) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .action_name(action_name)
+        .tooltip_text(tooltip)
+        .child(
+            &gtk::Image::builder()
+                .icon_name(icon_name)
+                .pixel_size(16)
+                .build(),
+        )
+        .css_classes(["circular", "flat"])
+        .build();
+    button.update_property(&[gtk::accessible::Property::Label(label)]);
+    button
+}
+
+/// Puts zoom out, the zoom percentage (resetting the zoom) and zoom in
+/// into the primary menu and returns the percentage button
+/// (`ptyxis_window_add_zoom_controls()`).
+fn add_zoom_controls(menu_button: &gtk::MenuButton) -> gtk::Button {
+    let zoom_out = zoom_icon_button(
+        &ZoomOutAction::action_name(),
+        "zoom-out-symbolic",
+        "Zoom Out",
+        "Zoom out",
+    );
+    let zoom_label = gtk::Button::builder()
+        .css_classes(["flat", "pill"])
+        .action_name(ZoomOneAction::action_name())
+        .hexpand(true)
+        .tooltip_text("Reset Zoom")
+        .label(ZoomLevel::DEFAULT.label())
+        .build();
+    let zoom_in = zoom_icon_button(
+        &ZoomInAction::action_name(),
+        "zoom-in-symbolic",
+        "Zoom In",
+        "Zoom in",
+    );
+    let zoom_box = gtk::Box::builder()
+        .spacing(12)
+        .margin_start(18)
+        .margin_end(18)
+        .build();
+    zoom_box.append(&zoom_out);
+    zoom_box.append(&zoom_label);
+    zoom_box.append(&zoom_in);
+    if let Some(popover) = menu_button.popover().and_downcast::<gtk::PopoverMenu>() {
+        popover.add_child(&zoom_box, ZOOM_ITEM);
+    }
+    zoom_label
 }
 
 /// The subtitle of a tab: the file or directory the shell reported
@@ -1138,14 +1200,22 @@ fn build_tab_menu() -> gio::Menu {
 
 /// Custom menu item id where the theme selector is placed.
 const INTERFACE_STYLE_ITEM: &str = "interface-style";
+/// Custom menu item id where the zoom controls are placed.
+const ZOOM_ITEM: &str = "zoom";
+
+/// A section holding only the custom menu item `id`.
+fn custom_item_section(id: &str) -> gio::Menu {
+    let section = gio::Menu::new();
+    let item = gio::MenuItem::new(None, None);
+    item.set_attribute_value("custom", Some(&id.to_variant()));
+    section.append_item(&item);
+    section
+}
 
 fn build_primary_menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    let section = gio::Menu::new();
-    let theme = gio::MenuItem::new(None, None);
-    theme.set_attribute_value("custom", Some(&INTERFACE_STYLE_ITEM.to_variant()));
-    section.append_item(&theme);
-    menu.append_section(None, &section);
+    menu.append_section(None, &custom_item_section(INTERFACE_STYLE_ITEM));
+    menu.append_section(None, &custom_item_section(ZOOM_ITEM));
     let section = gio::Menu::new();
     section.append_item(&RelmAction::<NewWindowAction>::to_menu_item("New _Window"));
     section.append_item(&RelmAction::<CloseTabAction>::to_menu_item("_Close Tab"));
@@ -1268,6 +1338,7 @@ impl Component for Window {
             .invert_boolean()
             .build();
         add_theme_controls(&window, &primary_menu_button, app.settings());
+        let zoom_label = add_zoom_controls(&primary_menu_button);
 
         let find_bar = FindBar::builder()
             .launch(())
@@ -1400,10 +1471,11 @@ impl Component for Window {
         let copy_action = add_action::<CopyAction>(&window, &sender, || WindowInput::Copy);
         copy_action.set_enabled(false);
         add_action::<PasteAction>(&window, &sender, || WindowInput::Paste);
-        let zoom_actions = ZoomActions {
+        let zoom_controls = ZoomControls {
             zoom_in: add_action::<ZoomInAction>(&window, &sender, || WindowInput::ZoomIn),
             zoom_out: add_action::<ZoomOutAction>(&window, &sender, || WindowInput::ZoomOut),
             zoom_one: add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset),
+            label: zoom_label,
         };
         add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
         let input = sender.input_sender().clone();
@@ -1571,7 +1643,7 @@ impl Component for Window {
             telemetry_revealer,
             _shortcuts: shortcuts,
             copy_action,
-            zoom_actions,
+            zoom_controls,
             _pinned_signals: pinned_signals,
             terminal_handlers: None,
             tab_css_class: None,
@@ -1721,6 +1793,23 @@ impl Component for Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_menu_custom_items() {
+        // Ptyxis's primary menu opens with the theme selector, then the
+        // zoom controls, each in its own section.
+        let menu = build_primary_menu();
+        for (index, id) in [(0, INTERFACE_STYLE_ITEM), (1, ZOOM_ITEM)] {
+            let section = menu
+                .item_link(index, gio::MENU_LINK_SECTION)
+                .expect("section");
+            assert_eq!(section.n_items(), 1, "{id}");
+            let custom = section
+                .item_attribute_value(0, "custom", Some(glib::VariantTy::STRING))
+                .and_then(|v| v.get::<String>());
+            assert_eq!(custom.as_deref(), Some(id));
+        }
+    }
 
     #[test]
     fn window_kind_for_command_line() {
