@@ -264,6 +264,13 @@ fn app_icon_name(has_icon: impl Fn(&str) -> bool) -> &'static str {
     }
 }
 
+/// The icon chosen at startup: tty-rex's own, or the Ptyxis fallback.
+pub fn icon_name() -> String {
+    gtk::Window::default_icon_name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| FALLBACK_ICON_NAME.to_owned())
+}
+
 impl App {
     fn new(application: &adw::Application) -> Result<Rc<Self>, SettingsError> {
         let settings = AppSettings::new()?;
@@ -740,10 +747,7 @@ impl App {
 
     /// Shows the About dialog over the active window.
     pub fn show_about(&self) {
-        // The icon chosen at startup: tty-rex's own, or the Ptyxis fallback.
-        let icon = gtk::Window::default_icon_name()
-            .map(|name| name.to_string())
-            .unwrap_or_else(|| FALLBACK_ICON_NAME.to_owned());
+        let icon = icon_name();
         let dialog = adw::AboutDialog::builder()
             .application_name(config::APP_NAME)
             .application_icon(icon)

@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::gio;
 
-use crate::config;
+use crate::app;
 use crate::tab;
 
 /// Commands quicker than this are not worth a notification
@@ -153,9 +153,11 @@ fn send_notification(uuid: &str, cmdline: &str) {
     };
     let notification = gio::Notification::new(NOTIFICATION_TITLE);
     notification.set_body(Some(cmdline));
+    // Ptyxis names it after APP_ID, but tty-rex's icon keeps the default
+    // id, so take the window's; GIO falls back to the non-symbolic name.
     notification.set_icon(&gio::ThemedIcon::new(&format!(
         "{}-symbolic",
-        config::APP_ID
+        app::icon_name()
     )));
     notification
         .set_default_action_and_target_value(FOCUS_TAB_BY_UUID_ACTION, Some(&uuid.to_variant()));
