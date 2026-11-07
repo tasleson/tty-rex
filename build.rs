@@ -253,21 +253,34 @@ fn command_output(program: &str, args: &[&str], dir: &Path) -> Option<String> {
 /// `ptyxis-build-ident.h` in Ptyxis's `src/meson.build`: `git describe`,
 /// or the package version outside a tagged checkout.
 fn generate_build_identifier(manifest_dir: &Path) {
-    let git_dir = manifest_dir.join(".git");
-    let head = git_dir.join("HEAD");
-    if head.is_file() {
+    // Ask git where its files are rather than assuming `.git/`: in a linked
+    // worktree or a submodule `.git` is a file pointing elsewhere, and HEAD
+    // lives apart from the refs shared by all worktrees.
+    let git_dirs = command_output(
+        "git",
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+        manifest_dir,
+    );
+    if let Some((git_dir, common_dir)) = git_dirs.as_deref().and_then(|d| d.split_once('\n')) {
+        let (git_dir, common_dir) = (Path::new(git_dir), Path::new(common_dir.trim()));
+        let head = git_dir.join("HEAD");
         // Rerun when a commit, checkout or tag changes what `git describe`
         // says. Only existing paths, as a missing one reruns every build.
         let mut watched = vec![
             head.clone(),
-            git_dir.join("packed-refs"),
-            git_dir.join("refs/tags"),
+            common_dir.join("packed-refs"),
+            common_dir.join("refs/tags"),
         ];
         if let Some(reference) = fs::read_to_string(&head)
             .ok()
             .and_then(|h| h.strip_prefix("ref: ").map(|r| r.trim().to_owned()))
         {
-            watched.push(git_dir.join(reference));
+            watched.push(common_dir.join(reference));
         }
         for path in watched.iter().filter(|p| p.exists()) {
             println!("cargo::rerun-if-changed={}", path.display());
@@ -282,6 +295,7 @@ fn generate_build_identifier(manifest_dir: &Path) {
 fn generate_build_versions(manifest_dir: &Path) {
     println!("cargo::rerun-if-env-changed=PKG_CONFIG");
     println!("cargo::rerun-if-env-changed=PKG_CONFIG_PATH");
+    println!("cargo::rerun-if-env-changed=PKG_CONFIG_LIBDIR");
     let pkg_config = env::var("PKG_CONFIG").unwrap_or_else(|_| "pkg-config".to_owned());
     for (module, var) in BUILD_VERSIONS {
         let version = command_output(&pkg_config, &["--modversion", module], manifest_dir)
