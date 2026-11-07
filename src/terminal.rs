@@ -27,6 +27,7 @@ use vte::prelude::*;
 use crate::palette::{self, Palette};
 use crate::profile::Profile;
 use crate::settings::AppSettings;
+use crate::terminal_widget::TerminalWidget;
 
 /// Zoom step, matching `PtyxisZoomLevel` (`MINUS_14` ..= `PLUS_14`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -78,16 +79,13 @@ impl ZoomLevel {
 
 /// Creates a terminal configured like the one in `src/ptyxis-tab.ui`.
 pub fn create() -> vte::Terminal {
-    let terminal = vte::Terminal::new();
+    let terminal: vte::Terminal = TerminalWidget::new().upcast();
     terminal.set_enable_fallback_scrolling(false);
     terminal.set_scroll_unit_is_pixels(true);
     terminal.set_allow_hyperlink(true);
     // Shells in toolbox and other containers report the container with
     // OSC 777, which sets the `vte.container.*` termprops.
     terminal.set_enable_legacy_osc777(true);
-    // The window paints the background (see `dressing`), which lets
-    // profile opacity show through like the C build.
-    terminal.set_clear_background(false);
     terminal.set_hexpand(true);
     terminal.set_vexpand(true);
     terminal

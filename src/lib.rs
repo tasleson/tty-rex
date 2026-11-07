@@ -65,6 +65,7 @@ pub mod telemetry;
 pub mod telemetry_bar;
 pub mod terminal;
 pub mod terminal_intent;
+pub mod terminal_widget;
 pub mod theme_selector;
 pub mod title_dialog;
 pub mod window;
