@@ -128,6 +128,9 @@ relm4::new_stateless_action!(
 
 pub struct WindowInit {
     pub app: Rc<App>,
+    /// A standalone instance's window for one command, which stays out of
+    /// the saved session (`single_terminal_mode`).
+    pub single_terminal: bool,
 }
 
 #[derive(Debug)]
@@ -214,6 +217,7 @@ pub struct Window {
     /// Set once the window is closing as a whole, when its tabs going away
     /// must not save the session again (`in_close_request`).
     in_close_request: Rc<Cell<bool>>,
+    single_terminal: bool,
 }
 
 /// Registers a parameterless action that forwards `message` to the window
@@ -311,7 +315,7 @@ impl Window {
     /// already (`update_visible_and_maybe_close()`).
     fn close_if_empty(&self) {
         if self.tab_view.n_pages() == 0 && !self.tab_view.is_transferring_page() {
-            if !self.in_close_request.get() {
+            if !self.in_close_request.get() && !self.single_terminal {
                 self.app.save_session();
             }
             self.window.destroy();
@@ -628,6 +632,7 @@ impl Component for Window {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let app = init.app;
+        let single_terminal = init.single_terminal;
         if config::APP_ID.ends_with(".Devel") {
             window.add_css_class(DEVEL_STYLE_CLASS);
         }
@@ -882,7 +887,7 @@ impl Component for Window {
         window.connect_close_request(move |window| {
             closing.set(true);
             if let (Some(app), Some(tab_view)) = (weak_app.upgrade(), weak_tab_view.upgrade()) {
-                if app.is_last_window(window.upcast_ref()) {
+                if !single_terminal && app.is_last_window(window.upcast_ref()) {
                     app.save_session();
                 }
                 release_tabs(&app, &tab_view);
@@ -911,6 +916,7 @@ impl Component for Window {
             tab_overview,
             overview_close_serial: 0,
             in_close_request,
+            single_terminal,
         };
         ComponentParts { model, widgets: () }
     }

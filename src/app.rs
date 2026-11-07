@@ -408,9 +408,14 @@ impl App {
     }
 
     pub fn new_window(self: &Rc<Self>) -> WindowRef {
+        self.launch_window(false)
+    }
+
+    fn launch_window(self: &Rc<Self>, single_terminal: bool) -> WindowRef {
         let controller = Window::builder()
             .launch(WindowInit {
                 app: Rc::clone(self),
+                single_terminal,
             })
             .detach();
         let tab_view = controller.model().tab_view().clone();
@@ -751,7 +756,15 @@ impl App {
                     WindowTarget::Current => self.current_window(),
                     WindowTarget::New => None,
                 };
-                let window = window.unwrap_or_else(|| self.new_window());
+                // Like ptyxis_window_new_for_command(), a standalone -x
+                // window (e.g. a Terminal=true desktop file) never saves
+                // the session, which would replace the user's windows.
+                let single_terminal = standalone
+                    && request.command.is_some()
+                    && !options.tab
+                    && !options.new_window
+                    && request.profile_uuid.is_none();
+                let window = window.unwrap_or_else(|| self.launch_window(single_terminal));
                 window.sender.emit(WindowInput::AddTab(request));
                 window.window.present();
             }
