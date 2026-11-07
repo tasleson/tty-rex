@@ -33,7 +33,9 @@
 //! A color the user gives a tab paints the top bar like a leader
 //! highlight. This is a tty-rex addition; Ptyxis has no tab colors.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use gtk::gdk;
@@ -258,8 +260,8 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
 pub struct Dressing {
     css_class: String,
     provider: gtk::CssProvider,
-    /// The CSS last loaded, to skip needless restyling.
-    css: String,
+    /// Hash of the CSS last loaded, to skip needless restyling.
+    css_hash: Option<u64>,
 }
 
 impl Dressing {
@@ -276,7 +278,7 @@ impl Dressing {
         Self {
             css_class: format!("{CLASS_PREFIX}{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
             provider,
-            css: String::new(),
+            css_hash: None,
         }
     }
 
@@ -287,9 +289,14 @@ impl Dressing {
 
     pub fn update(&mut self, style: &DressingStyle<'_>) {
         let css = dressing_css(&self.css_class, style);
-        if css != self.css {
+        let hash = {
+            let mut hasher = DefaultHasher::new();
+            css.hash(&mut hasher);
+            hasher.finish()
+        };
+        if self.css_hash != Some(hash) {
             self.provider.load_from_string(&css);
-            self.css = css;
+            self.css_hash = Some(hash);
         }
     }
 }
