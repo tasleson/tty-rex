@@ -80,6 +80,9 @@ const SETUP_CONTEXT_MENU_SIGNAL: &str = "setup-context-menu";
 /// (`copy_clipboard_action()`, `copy_link_address_action()`).
 const COPIED_TOAST_TITLE: &str = "Copied to clipboard";
 const COPIED_TOAST_TIMEOUT_SECS: u32 = 1;
+/// The toast when no handler could open a link (`ptyxis_tab_open_uri_cb()`).
+const OPEN_LINK_FAILED_TOAST_TITLE: &str = "Failed to open link";
+const OPEN_LINK_FAILED_TOAST_TIMEOUT_SECS: u32 = 3;
 
 /// Title of the color dialog and tooltip of the color dot.
 const TAB_COLOR_TITLE: &str = "Tab Color";
@@ -591,16 +594,25 @@ fn install_terminal_actions(terminal: &vte::Terminal, links: &Links, settings: &
     terminal.insert_action_group("clipboard", Some(&actions));
 }
 
-/// Opens `uri` with the desktop's handler (`ptyxis_tab_open_uri()`).
+/// Opens `uri` with the desktop's handler, saying so in a toast when that
+/// fails (`ptyxis_tab_open_uri()`, `ptyxis_tab_open_uri_cb()`).
 fn open_uri(terminal: &vte::Terminal, uri: &str) {
+    let weak = terminal.downgrade();
     gtk::UriLauncher::new(uri).launch(
         terminal.root().and_downcast_ref::<gtk::Window>(),
         None::<&gio::Cancellable>,
-        |result| {
+        move |result| {
             if let Err(e) = result
                 && !e.matches(gio::IOErrorEnum::Cancelled)
             {
                 glib::g_warning!("tty-rex", "Failed to open link: {e}");
+                if let Some(terminal) = weak.upgrade() {
+                    toast(
+                        &terminal,
+                        OPEN_LINK_FAILED_TOAST_TIMEOUT_SECS,
+                        OPEN_LINK_FAILED_TOAST_TITLE,
+                    );
+                }
             }
         },
     );
