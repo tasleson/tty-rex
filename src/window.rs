@@ -118,6 +118,10 @@ relm4::new_stateful_action!(
     (),
     bool
 );
+/// `win.tab.read-only`, a property action on the selected tab's terminal
+/// that `on_selected_page_changed()` replaces with each tab switch.
+const READ_ONLY_ACTION_NAME: &str = "tab.read-only";
+pub const READ_ONLY_ACTION: &str = "win.tab.read-only";
 /// Label of the telemetry toggle in menus.
 pub const TOGGLE_TELEMETRY_LABEL: &str = "Show _Telemetry";
 relm4::new_stateless_action!(pub SetTabColorAction, WindowActions, "set-tab-color");
@@ -397,6 +401,12 @@ impl Window {
         }
         self.copy_action.set_enabled(false);
         let tab = page.as_ref().and_then(|page| self.app.tab(&page.child()));
+        // Like the GPropertyAction on the tab's `read-only` property, which
+        // is the terminal's `input-enabled` inverted.
+        self.window.remove_action(READ_ONLY_ACTION_NAME);
+        if let Some(tab) = &tab {
+            self.window.add_action(&read_only_action(&tab.terminal));
+        }
         if let Some(class) = self.tab_css_class.take() {
             self.window.remove_css_class(&class);
         }
@@ -448,6 +458,16 @@ impl Window {
         self.terminal_handlers = Some((tab.terminal.clone(), vec![cwd_id, selection_id, bell_id]));
         tab.sender.emit(crate::tab::TabInput::Focus);
     }
+}
+
+/// `win.tab.read-only` for `terminal`, toggling whether it takes input.
+fn read_only_action(terminal: &vte::Terminal) -> gio::PropertyAction {
+    glib::Object::builder()
+        .property("name", READ_ONLY_ACTION_NAME)
+        .property("object", terminal)
+        .property("property-name", "input-enabled")
+        .property("invert-boolean", true)
+        .build()
 }
 
 /// A request for a new tab in `tab_view` carrying over state from its
@@ -767,6 +787,15 @@ fn track_pinned(
 const HIDDEN_WHEN_ATTRIBUTE: &str = "hidden-when";
 const HIDDEN_WHEN_ACTION_DISABLED: &str = "action-disabled";
 
+/// Hides `item` while its action is disabled, as the
+/// `hidden-when="action-disabled"` attribute does in Ptyxis's menus.
+pub fn hide_when_disabled(item: &gio::MenuItem) {
+    item.set_attribute_value(
+        HIDDEN_WHEN_ATTRIBUTE,
+        Some(&HIDDEN_WHEN_ACTION_DISABLED.to_variant()),
+    );
+}
+
 /// The tab context menu of `src/ptyxis-window.ui`.
 fn build_tab_menu() -> gio::Menu {
     let menu = gio::Menu::new();
@@ -784,10 +813,7 @@ fn build_tab_menu() -> gio::Menu {
         RelmAction::<PinTabAction>::to_menu_item("_Pin Tab"),
         RelmAction::<UnpinTabAction>::to_menu_item("Un_pin Tab"),
     ] {
-        item.set_attribute_value(
-            HIDDEN_WHEN_ATTRIBUTE,
-            Some(&HIDDEN_WHEN_ACTION_DISABLED.to_variant()),
-        );
+        hide_when_disabled(&item);
         section.append_item(&item);
     }
     menu.append_section(None, &section);
@@ -797,10 +823,7 @@ fn build_tab_menu() -> gio::Menu {
         "Set _Color…",
     ));
     let reset_color = RelmAction::<ResetTabColorAction>::to_menu_item("_Reset Color");
-    reset_color.set_attribute_value(
-        HIDDEN_WHEN_ATTRIBUTE,
-        Some(&HIDDEN_WHEN_ACTION_DISABLED.to_variant()),
-    );
+    hide_when_disabled(&reset_color);
     section.append_item(&reset_color);
     menu.append_section(None, &section);
     let section = gio::Menu::new();

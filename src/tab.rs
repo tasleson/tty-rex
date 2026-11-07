@@ -51,7 +51,10 @@ use crate::tab_notify::{self, TabNotify};
 use crate::telemetry::Pid;
 use crate::terminal::{self, ZoomLevel};
 use crate::title_dialog::{SET_TITLE_LABEL, TitleDialog};
-use crate::window::{SetTitleAction, TOGGLE_TELEMETRY_LABEL, ToggleTelemetryAction};
+use crate::window::{
+    READ_ONLY_ACTION, SetTitleAction, TOGGLE_TELEMETRY_LABEL, ToggleTelemetryAction,
+    hide_when_disabled,
+};
 
 /// Exits faster than this without user input are treated as failures so the
 /// error stays visible (see `ptyxis_tab_wait_cb()`).
@@ -64,6 +67,9 @@ const RESTART_LABEL: &str = "_Restart";
 const EDIT_PROFILE_LABEL: &str = "Edit Profile";
 /// Application action opening the profile editor (`app.edit-profile`).
 pub const EDIT_PROFILE_ACTION: &str = "app.edit-profile";
+
+const COPY_AS_HTML_ACTION: &str = "clipboard.copy-as-html";
+const RESET_ACTION: &str = "tab.reset";
 
 /// Title of the color dialog and tooltip of the color dot.
 const TAB_COLOR_TITLE: &str = "Tab Color";
@@ -374,12 +380,25 @@ fn context_menu() -> gio::Menu {
     menu.append_section(None, &section);
     let section = gio::Menu::new();
     section.append(Some("_Copy"), Some("win.copy-clipboard"));
+    let copy_as_html = gio::MenuItem::new(Some("Copy as _HTML"), Some(COPY_AS_HTML_ACTION));
+    hide_when_disabled(&copy_as_html);
+    section.append_item(&copy_as_html);
     section.append(Some("_Paste"), Some("win.paste-clipboard"));
     menu.append_section(None, &section);
     let section = gio::Menu::new();
     for (label, select) in [("Select _All", true), ("Select _None", false)] {
         let item = gio::MenuItem::new(Some(label), None);
         item.set_action_and_target_value(Some("terminal.select-all"), Some(&select.to_variant()));
+        section.append_item(&item);
+    }
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    section.append(Some("Read-Only"), Some(READ_ONLY_ACTION));
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
+    for (label, clear) in [("Reset", false), ("Reset and Clear", true)] {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(Some(RESET_ACTION), Some(&clear.to_variant()));
         section.append_item(&item);
     }
     menu.append_section(None, &section);
@@ -392,7 +411,10 @@ fn context_menu() -> gio::Menu {
     menu
 }
 
-/// `terminal.select-all(b)`: select everything, or nothing when false.
+/// The terminal's own actions: `terminal.select-all(b)` selects
+/// everything, or nothing when false, and `clipboard.copy-as-html` copies
+/// the selection as HTML, available only while there is one
+/// (`ptyxis_terminal_update_clipboard_actions()`).
 fn install_terminal_actions(terminal: &vte::Terminal) {
     let select_all = gio::SimpleAction::new("select-all", Some(glib::VariantTy::BOOLEAN));
     let weak = terminal.downgrade();
@@ -409,6 +431,48 @@ fn install_terminal_actions(terminal: &vte::Terminal) {
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&select_all);
     terminal.insert_action_group("terminal", Some(&actions));
+
+    let copy_as_html = gio::SimpleAction::new("copy-as-html", None);
+    copy_as_html.set_enabled(terminal.has_selection());
+    let weak = terminal.downgrade();
+    copy_as_html.connect_activate(move |_, _| {
+        if let Some(terminal) = weak.upgrade() {
+            copy_selection(&terminal, vte::Format::Html);
+        }
+    });
+    let action = copy_as_html.clone();
+    terminal
+        .connect_selection_changed(move |terminal| action.set_enabled(terminal.has_selection()));
+    let actions = gio::SimpleActionGroup::new();
+    actions.add_action(&copy_as_html);
+    terminal.insert_action_group("clipboard", Some(&actions));
+}
+
+/// Puts the selection on the clipboard as plain text in `format`, which
+/// for HTML is the markup itself (`copy_clipboard_action()`).
+fn copy_selection(terminal: &vte::Terminal, format: vte::Format) {
+    if let Some(text) = terminal
+        .text_selected(format)
+        .filter(|text| !text.is_empty())
+    {
+        terminal.clipboard().set_text(&text);
+    }
+}
+
+/// `tab.reset(b)`: resets the terminal, also clearing the scrollback when
+/// true (`ptyxis_window_tab_reset_action()`). Ptyxis installs it on the
+/// window for the active tab; it lives on the tab here so the tab's own
+/// `tab` actions do not hide it from the context menu.
+fn reset_action(terminal: &vte::Terminal) -> gio::SimpleAction {
+    let reset = gio::SimpleAction::new("reset", Some(glib::VariantTy::BOOLEAN));
+    let weak = terminal.downgrade();
+    reset.connect_activate(move |_, clear| {
+        if let Some(terminal) = weak.upgrade() {
+            let clear = clear.and_then(|v| v.get::<bool>()).unwrap_or(false);
+            terminal.reset(true, clear);
+        }
+    });
+    reset
 }
 
 /// Finds the tab view and page currently hosting `child`.
@@ -993,6 +1057,7 @@ impl Component for Tab {
         inspect.connect_activate(move |_, _| input.emit(TabInput::Inspect));
         let tab_actions = gio::SimpleActionGroup::new();
         tab_actions.add_action(&inspect);
+        tab_actions.add_action(&reset_action(&terminal));
         root.insert_action_group("tab", Some(&tab_actions));
 
         // The page only exists once the window has inserted us.
