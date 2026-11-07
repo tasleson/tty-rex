@@ -191,6 +191,21 @@ const PTYXIS_CREDIT: &str = "Ptyxis by Christian Hergert https://gitlab.gnome.or
 
 /// Icon used while tty-rex's own icon is not installed.
 const FALLBACK_ICON_NAME: &str = "org.gnome.Ptyxis";
+/// How long a force-quit tab's program gets to handle `SIGHUP` before
+/// `SIGKILL` (`ptyxis_tab_force_quit()`).
+const FORCE_QUIT_KILL_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Sends `signal` to `pid`, logging failures (e.g. a process that is gone).
+fn send_signal(pid: Pid, signal: libc::c_int) {
+    // SAFETY: kill() has no memory-safety preconditions.
+    if unsafe { libc::kill(pid, signal) } != 0 {
+        let e = std::io::Error::last_os_error();
+        glib::g_debug!(
+            "tty-rex",
+            "Cannot send signal {signal} to process {pid}: {e}"
+        );
+    }
+}
 
 /// The window icon: tty-rex's own when the icon theme has it, otherwise
 /// Ptyxis's, which an installed Ptyxis provides.
@@ -407,21 +422,27 @@ impl App {
         self.tabs.borrow_mut().remove(child);
     }
 
-    /// Kills a closed tab's process and drops the tab once it can no longer
-    /// be reopened (`ptyxis_tab_force_quit()`). Unlike an ordinary close,
-    /// which leaves the hangup to VTE, a parked tab's program may have
-    /// ignored that, so it gets `SIGKILL` like in Ptyxis.
+    /// Ends a closed tab once it can no longer be reopened
+    /// (`ptyxis_tab_force_quit()`). Like Ptyxis it sends `SIGHUP` first, so
+    /// shells such as bash save their history, and `SIGKILL` shortly after
+    /// in case the program ignored the hangup. The tab is kept until then
+    /// so its exit is noticed and an already reaped pid is never signaled.
     pub fn force_quit_tab(&self, child: &gtk::Widget) {
         let Some(handle) = self.tabs.borrow_mut().remove(child) else {
             return;
         };
-        if let Some(pid) = handle.child_pid.get() {
-            // SAFETY: kill() has no memory-safety preconditions.
-            if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
-                let e = std::io::Error::last_os_error();
-                glib::g_debug!("tty-rex", "Cannot kill process {pid}: {e}");
+        let Some(pid) = handle.child_pid.get() else {
+            return;
+        };
+        send_signal(pid, libc::SIGHUP);
+        glib::timeout_add_local_once(FORCE_QUIT_KILL_DELAY, move || {
+            // A tab whose profile restarts its program may have a new one
+            // by now; that one goes with the terminal, like after a close.
+            if handle.child_pid.get() == Some(pid) {
+                send_signal(pid, libc::SIGKILL);
             }
-        }
+            drop(handle);
+        });
     }
 
     pub fn new_window(self: &Rc<Self>) -> WindowRef {
