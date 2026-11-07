@@ -246,6 +246,8 @@ pub struct Window {
     /// Closed tabs that `win.undo-close-tab` can still reopen; shared with
     /// the close-request handler, which releases them with the window.
     parked: Rc<RefCell<ParkingLot<gtk::Widget>>>,
+    /// Briefly shows the header bars in fullscreen on a tab switch.
+    fullscreen_box: FullscreenBox,
 }
 
 /// Registers a parameterless action that forwards `message` to the window
@@ -411,6 +413,8 @@ impl Window {
             }
         }
         self.copy_action.set_enabled(false);
+        // Shows which tab is now selected when in fullscreen.
+        self.fullscreen_box.reveal();
         let tab = page.as_ref().and_then(|page| self.app.tab(&page.child()));
         // Like the GPropertyAction on the tab's `read-only` property, which
         // is the terminal's `input-enabled` inverted.
@@ -466,7 +470,16 @@ impl Window {
         let bell_id = tab
             .terminal
             .connect_bell(move |_| input.emit(WindowInput::Bell));
-        self.terminal_handlers = Some((tab.terminal.clone(), vec![cwd_id, selection_id, bell_id]));
+        // Typing hides the bars a tab switch revealed
+        // (`ptyxis_window_active_tab_commit_cb()`).
+        let fullscreen_box = self.fullscreen_box.clone();
+        let commit_id = tab
+            .terminal
+            .connect_commit(move |_, _, _| fullscreen_box.unreveal());
+        self.terminal_handlers = Some((
+            tab.terminal.clone(),
+            vec![cwd_id, selection_id, bell_id, commit_id],
+        ));
         tab.sender.emit(crate::tab::TabInput::Focus);
     }
 }
@@ -1311,7 +1324,7 @@ impl Component for Window {
             reset_color.set_enabled(has_color);
         });
         add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
-        track_fullscreen(&window, fullscreen_box);
+        track_fullscreen(&window, fullscreen_box.clone());
         add_shortcut_actions(
             &window,
             &app,
@@ -1426,6 +1439,7 @@ impl Component for Window {
             in_close_request,
             single_terminal,
             parked,
+            fullscreen_box,
         };
         ComponentParts { model, widgets: () }
     }

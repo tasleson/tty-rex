@@ -30,6 +30,8 @@ use gtk::glib;
 
 /// How long the bars stay once the pointer leaves them.
 const FULLSCREEN_HIDE_DELAY: Duration = Duration::from_millis(300);
+/// How long [`FullscreenBox::reveal`] keeps the bars regardless of the pointer.
+const FORCED_REVEAL_DELAY: Duration = Duration::from_millis(1500);
 /// Distance from the top edge that reveals the bars when they have no height.
 const SHOW_HEADERBAR_DISTANCE_PX: f64 = 5.0;
 
@@ -38,6 +40,8 @@ struct Inner {
     fullscreen: Cell<bool>,
     autohide: Cell<bool>,
     timeout: RefCell<Option<glib::SourceId>>,
+    /// Set while a [`FullscreenBox::reveal`] holds the bars open.
+    forced_reveal: RefCell<Option<glib::SourceId>>,
     last_focus: RefCell<Option<gtk::Widget>>,
     last_y: Cell<f64>,
     is_touch: Cell<bool>,
@@ -64,6 +68,7 @@ impl FullscreenBox {
             fullscreen: Cell::new(false),
             autohide: Cell::new(true),
             timeout: RefCell::new(None),
+            forced_reveal: RefCell::new(None),
             last_focus: RefCell::new(window.focus()),
             last_y: Cell::new(0.0),
             is_touch: Cell::new(false),
@@ -132,13 +137,44 @@ impl FullscreenBox {
         }
     }
 
-    /// Shows the bars for a moment, as when entering fullscreen
-    /// (`ptyxis_fullscreen_box_reveal()`).
+    /// Shows the bars for a moment, as when entering fullscreen or
+    /// switching tabs, whatever the pointer does meanwhile unless it goes
+    /// to the top edge (`ptyxis_fullscreen_box_reveal()`).
     pub fn reveal(&self) {
+        self.clear_forced_reveal();
         self.show_ui();
-        if self.0.fullscreen.get() && self.0.autohide.get() {
-            self.start_hide_timeout();
+        // Without this, a pointer that does not move would keep the bars
+        // shown after a tab switch.
+        self.0.last_y.set(f64::MAX);
+        self.clear_timeout();
+        let weak = Rc::downgrade(&self.0);
+        let id = glib::timeout_add_local_once(FORCED_REVEAL_DELAY, move || {
+            if let Some(inner) = weak.upgrade() {
+                let this = Self(inner);
+                // The source is gone once it fires.
+                this.0.forced_reveal.take();
+                this.update(true);
+            }
+        });
+        *self.0.forced_reveal.borrow_mut() = Some(id);
+    }
+
+    /// Ends a [`Self::reveal`] early, as typing does
+    /// (`ptyxis_fullscreen_box_unreveal()`).
+    pub fn unreveal(&self) {
+        if self.clear_forced_reveal() {
+            self.update(true);
         }
+    }
+
+    /// Whether a forced reveal was pending.
+    fn clear_forced_reveal(&self) -> bool {
+        let id = self.0.forced_reveal.take();
+        let pending = id.is_some();
+        if let Some(id) = id {
+            id.remove();
+        }
+        pending
     }
 
     fn show_ui(&self) {
@@ -209,6 +245,12 @@ impl FullscreenBox {
     fn update(&self, hide_immediately: bool) {
         if !self.0.autohide.get() || !self.0.fullscreen.get() {
             return;
+        }
+        if self.0.forced_reveal.borrow().is_some() {
+            if self.0.last_y.get() > self.titlebar_area_height() {
+                return;
+            }
+            self.clear_forced_reveal();
         }
         if !self.0.is_touch.get() && self.0.last_y.get() <= self.titlebar_area_height() {
             self.show_ui();
