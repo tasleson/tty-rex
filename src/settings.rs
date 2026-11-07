@@ -48,6 +48,7 @@ pub mod key {
     pub const INTERFACE_STYLE: &str = "interface-style";
     pub const NEW_TAB_POSITION: &str = "new-tab-position";
     pub const PROFILE_UUIDS: &str = "profile-uuids";
+    pub const PROMPT_ON_CLOSE: &str = "prompt-on-close";
     pub const RESTORE_SESSION: &str = "restore-session";
     pub const RESTORE_WINDOW_SIZE: &str = "restore-window-size";
     pub const SCROLLBAR_POLICY: &str = "scrollbar-policy";
@@ -72,6 +73,7 @@ pub mod key {
         INTERFACE_STYLE,
         NEW_TAB_POSITION,
         PROFILE_UUIDS,
+        PROMPT_ON_CLOSE,
         RESTORE_SESSION,
         RESTORE_WINDOW_SIZE,
         SCROLLBAR_POLICY,
@@ -516,6 +518,12 @@ impl AppSettings {
     /// start (`ptyxis_settings_get_restore_session()`).
     pub fn restore_session(&self) -> bool {
         self.settings.boolean(key::RESTORE_SESSION)
+    }
+
+    /// Whether closing a tab or window with a program still running asks
+    /// first (`ptyxis_settings_get_prompt_on_close()`).
+    pub fn prompt_on_close(&self) -> bool {
+        self.settings.boolean(key::PROMPT_ON_CLOSE)
     }
 
     pub fn restore_window_size(&self) -> bool {

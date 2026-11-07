@@ -112,6 +112,75 @@ pub fn foreground_leader(pty: BorrowedFd<'_>) -> Option<(i32, LeaderKind)> {
     foreground_pgrp(pty).map(|pgrp| (pgrp, classify_pid(Path::new(PROC_DIR), pgrp)))
 }
 
+/// `get_cmdline_for_pid()` reads at most this much of `/proc/PID/cmdline`.
+const CMDLINE_MAX: usize = 1024;
+
+/// A program other than the tab's own child in the terminal's foreground,
+/// as the agent's `HasForegroundProcess` call reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Foreground {
+    /// The foreground process group.
+    pub pid: i32,
+    /// Its command line with arguments separated by spaces, if readable.
+    pub cmdline: Option<String>,
+}
+
+impl Foreground {
+    /// The program name, up to the first space (`ptyxis_tab_poll_agent_cb()`).
+    /// Every argument read from `/proc` ends in one, so only a command line
+    /// cut short at [`CMDLINE_MAX`] lacks it, and then there is none.
+    pub fn program_name(&self) -> Option<&str> {
+        self.cmdline
+            .as_deref()?
+            .split_once(' ')
+            .map(|(name, _)| name)
+    }
+
+    /// Whether a program other than a shell runs in the foreground, the
+    /// test behind close confirmation (`ptyxis_tab_is_running()`).
+    pub fn is_running(&self, is_shell: impl Fn(&str) -> bool) -> bool {
+        self.program_name().is_some_and(|name| !is_shell(name))
+    }
+}
+
+/// Turns the raw contents of `/proc/PID/cmdline` into a printable line
+/// like `get_cmdline_for_pid()`: separators and control characters become
+/// spaces and invalid UTF-8 is replaced. Empty contents give `None`.
+pub fn cmdline_from_bytes(bytes: &[u8]) -> Option<String> {
+    let bytes = &bytes[..bytes.len().min(CMDLINE_MAX)];
+    if bytes.is_empty() {
+        return None;
+    }
+    let spaced: Vec<u8> = bytes
+        .iter()
+        .map(|&b| if b.is_ascii_control() { b' ' } else { b })
+        .collect();
+    Some(String::from_utf8_lossy(&spaced).into_owned())
+}
+
+fn read_cmdline(proc_dir: &Path, pid: i32) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::with_capacity(CMDLINE_MAX);
+    std::fs::File::open(proc_dir.join(pid.to_string()).join("cmdline"))
+        .ok()?
+        .take(CMDLINE_MAX as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    cmdline_from_bytes(&buf)
+}
+
+/// What runs in the foreground of the terminal on `pty`, unless it is
+/// `child_pid`, the program the tab started (`has_foreground_process()` in
+/// `agent/ptyxis-process-impl.c`). A tab without a child has none.
+pub fn foreground_process(pty: BorrowedFd<'_>, child_pid: Option<i32>) -> Option<Foreground> {
+    let child_pid = child_pid?;
+    let pgrp = foreground_pgrp(pty)?;
+    (pgrp != child_pid).then(|| Foreground {
+        pid: pgrp,
+        cmdline: read_cmdline(Path::new(PROC_DIR), pgrp),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +292,52 @@ mod tests {
         let file = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(foreground_pgrp(file.as_fd()), None);
         assert_eq!(foreground_leader(file.as_fd()), None);
+        assert_eq!(foreground_process(file.as_fd(), Some(1)), None);
+    }
+
+    #[test]
+    fn cmdlines() {
+        let long = vec![b'x'; CMDLINE_MAX + 10];
+        let cases: [(&[u8], Option<&str>); 6] = [
+            (b"", None),
+            (b"vim\0", Some("vim ")),
+            (b"vim\0file.txt\0", Some("vim file.txt ")),
+            (b"a\tb\nc\0", Some("a b c ")),
+            (b"caf\xc3\xa9\0", Some("café ")),
+            (b"bad\xff\0", Some("bad\u{fffd} ")),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(cmdline_from_bytes(bytes).as_deref(), expected, "{bytes:?}");
+        }
+        assert_eq!(cmdline_from_bytes(&long).unwrap().len(), CMDLINE_MAX);
+    }
+
+    #[test]
+    fn running_programs() {
+        let is_shell = |name: &str| matches!(name, "bash" | "/bin/zsh");
+        let cases = [
+            (Some("vim file.txt "), Some("vim"), true),
+            (Some("bash "), Some("bash"), false),
+            (Some("/bin/zsh -l "), Some("/bin/zsh"), false),
+            (Some("/usr/bin/top "), Some("/usr/bin/top"), true),
+            // Cut short without a separator, or unreadable.
+            (Some("truncated"), None, false),
+            (None, None, false),
+        ];
+        for (cmdline, name, running) in cases {
+            let foreground = Foreground {
+                pid: 42,
+                cmdline: cmdline.map(str::to_owned),
+            };
+            assert_eq!(foreground.program_name(), name, "{cmdline:?}");
+            assert_eq!(foreground.is_running(is_shell), running, "{cmdline:?}");
+        }
+    }
+
+    #[test]
+    fn own_cmdline_is_readable() {
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let cmdline = read_cmdline(Path::new(PROC_DIR), pid).unwrap();
+        assert!(cmdline.ends_with(' '), "{cmdline:?}");
     }
 }

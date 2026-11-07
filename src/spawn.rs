@@ -138,6 +138,18 @@ pub fn is_shell_in(arg0: &str, configured_shells: &[String]) -> bool {
     BUILTIN_SHELLS.contains(&basename(arg0)) || configured_shells.iter().any(|s| s == arg0)
 }
 
+/// Whether `arg0` names a shell on the host (`ptyxis_is_shell()`), reading
+/// `/etc/shells` once like the C function.
+pub fn is_shell(arg0: &str) -> bool {
+    static CONFIGURED_SHELLS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let configured = CONFIGURED_SHELLS.get_or_init(|| {
+        std::fs::read_to_string(ETC_SHELLS)
+            .map(|contents| parse_etc_shells(&contents))
+            .unwrap_or_default()
+    });
+    is_shell_in(arg0, configured)
+}
+
 /// Parses `/etc/shells`, skipping blank lines and comments.
 pub fn parse_etc_shells(contents: &str) -> Vec<String> {
     contents
