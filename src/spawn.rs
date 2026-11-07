@@ -477,7 +477,10 @@ fn spawn_on_host(
             // Variables go to the container through the wrapper, so the
             // host command needs none of its own.
             let cwd = plan.cwd.or_else(home_dir).unwrap_or_default();
-            env.push(format!("PWD={cwd}"));
+            // A caller-supplied PWD wins, as in the Ptyxis agent.
+            if !env.iter().any(|var| var.starts_with("PWD=")) {
+                env.push(format!("PWD={cwd}"));
+            }
             let env_in_container =
                 container::with_minimal_environment(&env, |key| std::env::var(key).ok());
             let user = glib::user_name();
