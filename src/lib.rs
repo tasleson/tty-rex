@@ -59,6 +59,7 @@ pub mod proxy;
 pub mod session;
 pub mod settings;
 pub mod shortcuts;
+pub mod signal_guard;
 pub mod spawn;
 pub mod tab;
 pub mod tab_notify;

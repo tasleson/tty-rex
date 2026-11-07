@@ -35,6 +35,7 @@ use gtk::{gio, glib};
 
 use super::widgets;
 use crate::profile::{self, CustomLink, Profile};
+use crate::signal_guard::SignalGuard;
 
 const GROUP_ACTIONS: &str = "custom-link";
 const ROW_ACTIONS: &str = "custom_link";
@@ -163,21 +164,7 @@ struct State {
     profile: Profile,
     links: LinkList,
     rows: HashMap<LinkId, adw::ActionRow>,
-    handler: Option<glib::SignalHandlerId>,
-}
-
-impl State {
-    fn disconnect(&mut self) {
-        if let Some(id) = self.handler.take() {
-            self.profile.gsettings().disconnect(id);
-        }
-    }
-}
-
-impl Drop for State {
-    fn drop(&mut self) {
-        self.disconnect();
-    }
+    handler: Option<SignalGuard>,
 }
 
 /// The custom links list for one profile.
@@ -228,7 +215,7 @@ impl CustomLinksGroup {
     pub fn set_profile(&self, profile: &Profile) {
         {
             let mut state = self.state.borrow_mut();
-            state.disconnect();
+            state.handler = None;
             state.profile = profile.clone();
             state.links = LinkList::new(profile.custom_links());
         }
@@ -238,15 +225,14 @@ impl CustomLinksGroup {
 
     fn watch(&self) {
         let weak = self.downgrade();
-        let id = self.state.borrow().profile.gsettings().connect_changed(
-            Some(profile::key::CUSTOM_LINKS),
-            move |_, _| {
-                if let Some(this) = weak.upgrade() {
-                    this.reload();
-                }
-            },
-        );
-        self.state.borrow_mut().handler = Some(id);
+        let mut state = self.state.borrow_mut();
+        let gsettings = state.profile.gsettings().clone();
+        let id = gsettings.connect_changed(Some(profile::key::CUSTOM_LINKS), move |_, _| {
+            if let Some(this) = weak.upgrade() {
+                this.reload();
+            }
+        });
+        state.handler = Some(SignalGuard::new(&gsettings, id));
     }
 
     fn reload(&self) {

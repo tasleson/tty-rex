@@ -43,6 +43,7 @@ use crate::fullscreen_box::FullscreenBox;
 use crate::parking_lot::{self, ParkingLot};
 use crate::settings::{NewTabPosition, TabMiddleClick};
 use crate::shortcuts::Shortcuts;
+use crate::signal_guard::{SignalGuard, drop_on_destroy};
 use crate::tab_notify;
 use crate::telemetry_bar::{TelemetryBar, TelemetryBarInput};
 use crate::terminal::{self, ZoomLevel};
@@ -278,7 +279,7 @@ pub struct Window {
     /// shows the applicable one.
     _pinned_signals: glib::SignalGroup,
     /// Handlers on the selected tab's terminal, dropped on tab switch.
-    terminal_handlers: Option<(vte::Terminal, Vec<glib::SignalHandlerId>)>,
+    terminal_handlers: Vec<SignalGuard>,
     /// CSS class of the selected tab, which lets that tab style the window
     /// (e.g. highlight it while running sudo or ssh).
     tab_css_class: Option<String>,
@@ -490,11 +491,7 @@ impl Window {
         let page = self.tab_view.selected_page();
         self.title_bindings.set_source(page.as_ref());
 
-        if let Some((terminal, ids)) = self.terminal_handlers.take() {
-            for id in ids {
-                terminal.disconnect(id);
-            }
-        }
+        self.terminal_handlers.clear();
         self.copy_action.set_enabled(false);
         update_paste_action(&self.paste_action, &self.tab_view);
         // Shows which tab is now selected when in fullscreen.
@@ -541,37 +538,33 @@ impl Window {
             window_title.set_subtitle(&subtitle);
         };
         update_subtitle(&tab.terminal);
-        let cwd_id =
-            terminal::connect_current_directory_uri_changed(&tab.terminal, update_subtitle);
+        let terminal = &tab.terminal;
+        let cwd_id = terminal::connect_current_directory_uri_changed(terminal, update_subtitle);
 
         let copy_action = self.copy_action.clone();
         copy_action.set_enabled(tab.terminal.has_selection());
-        let selection_id = tab.terminal.connect_selection_changed(move |terminal| {
+        let selection_id = terminal.connect_selection_changed(move |terminal| {
             copy_action.set_enabled(terminal.has_selection())
         });
         // Like ptyxis_window_active_tab_bell_cb(), only the selected tab
         // flashes the window.
         let input = self.input.clone();
-        let bell_id = tab
-            .terminal
-            .connect_bell(move |_| input.emit(WindowInput::Bell));
+        let bell_id = terminal.connect_bell(move |_| input.emit(WindowInput::Bell));
         // Typing hides the bars a tab switch revealed
         // (`ptyxis_window_active_tab_commit_cb()`).
         let fullscreen_box = self.fullscreen_box.clone();
-        let commit_id =
-            terminal::connect_commit_bytes(&tab.terminal, move || fullscreen_box.unreveal());
+        let commit_id = terminal::connect_commit_bytes(terminal, move || fullscreen_box.unreveal());
         // The tab sets its zoom before the font scale, so the notify sees
         // the new level (the tab's `notify::zoom` in Ptyxis).
         let zoom_controls = self.zoom_controls.clone();
         let zoom = Rc::clone(&tab.zoom);
         zoom_controls.update(Some(zoom.get()));
-        let zoom_id = tab
-            .terminal
-            .connect_font_scale_notify(move |_| zoom_controls.update(Some(zoom.get())));
-        self.terminal_handlers = Some((
-            tab.terminal.clone(),
-            vec![cwd_id, selection_id, bell_id, commit_id, zoom_id],
-        ));
+        let zoom_id =
+            terminal.connect_font_scale_notify(move |_| zoom_controls.update(Some(zoom.get())));
+        self.terminal_handlers = [cwd_id, selection_id, bell_id, commit_id, zoom_id]
+            .into_iter()
+            .map(|id| SignalGuard::new(terminal, id))
+            .collect();
         tab.sender.emit(crate::tab::TabInput::Focus);
     }
 }
@@ -694,13 +687,7 @@ fn add_theme_controls(
             }
         },
     );
-    let gsettings = settings.gsettings().clone();
-    let id = std::cell::Cell::new(Some(id));
-    window.connect_destroy(move |_| {
-        if let Some(id) = id.take() {
-            gsettings.disconnect(id);
-        }
-    });
+    drop_on_destroy(window, SignalGuard::new(settings.gsettings(), id));
     window.add_action(&action);
 
     let action_name = format!("win.{INTERFACE_STYLE_ITEM}");
@@ -1189,12 +1176,7 @@ fn track_clipboard(
             update_paste_action(&action, &tab_view);
         }
     });
-    let id = Cell::new(Some(id));
-    window.connect_destroy(move |_| {
-        if let Some(id) = id.take() {
-            clipboard.disconnect(id);
-        }
-    });
+    drop_on_destroy(window, SignalGuard::new(&clipboard, id));
 }
 
 /// Keeps `win.pin-tab` / `win.unpin-tab` in line with the selected page
@@ -1762,7 +1744,7 @@ impl Component for Window {
             paste_action,
             zoom_controls,
             _pinned_signals: pinned_signals,
-            terminal_handlers: None,
+            terminal_handlers: Vec::new(),
             tab_css_class: None,
             input: sender.input_sender().clone(),
             visual_bell,

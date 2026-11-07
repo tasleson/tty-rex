@@ -36,6 +36,7 @@ use vte::prelude::*;
 use crate::palette;
 use crate::palette_preview::ColorSwatch;
 use crate::profile::Profile;
+use crate::signal_guard::SignalGuard;
 use crate::terminal::{self, ZoomLevel};
 
 const UNSET: &str = "unset";
@@ -116,7 +117,7 @@ pub struct Inspector {
     rows: Rows,
     swatches: Vec<ColorSwatch>,
     motion: gtk::EventControllerMotion,
-    handlers: Vec<(glib::Object, glib::SignalHandlerId)>,
+    handlers: Vec<SignalGuard>,
     tick: Option<gtk::TickCallbackId>,
 }
 
@@ -315,63 +316,43 @@ impl Component for Inspector {
         ));
 
         let terminal = init.terminal;
-        let mut handlers: Vec<(glib::Object, glib::SignalHandlerId)> = Vec::new();
-        let mut track = |object: glib::Object, id| handlers.push((object, id));
-        let term: glib::Object = terminal.clone().upcast();
+        let mut handlers = Vec::new();
         let emit = |message: fn() -> InspectorInput| {
             let input = sender.input_sender().clone();
             move |_: &vte::Terminal| input.emit(message())
         };
-        track(
-            term.clone(),
+        let ids = [
             terminal.connect_cursor_moved(emit(|| InspectorInput::Cursor)),
-        );
-        let input = sender.input_sender().clone();
-        track(
-            term.clone(),
-            terminal.connect_char_size_changed(move |_, _, _| input.emit(InspectorInput::CellSize)),
-        );
-        track(
-            term.clone(),
+            {
+                let input = sender.input_sender().clone();
+                terminal
+                    .connect_char_size_changed(move |_, _, _| input.emit(InspectorInput::CellSize))
+            },
             terminal.connect_font_desc_notify(emit(|| InspectorInput::Font)),
-        );
-        track(
-            term.clone(),
             terminal.connect_font_scale_notify(emit(|| InspectorInput::Font)),
-        );
-        track(
-            term.clone(),
             terminal::connect_window_title_changed(&terminal, emit(|| InspectorInput::Uris)),
-        );
-        track(
-            term.clone(),
             terminal::connect_current_directory_uri_changed(
                 &terminal,
                 emit(|| InspectorInput::Uris),
             ),
-        );
-        track(
-            term.clone(),
             terminal::connect_current_file_uri_changed(&terminal, emit(|| InspectorInput::Uris)),
-        );
-        track(
-            term.clone(),
             terminal.connect_hyperlink_hover_uri_notify(emit(|| InspectorInput::Uris)),
-        );
+        ];
+        handlers.extend(ids.into_iter().map(|id| SignalGuard::new(&terminal, id)));
         let input = sender.input_sender().clone();
-        let profile_settings = init.profile.gsettings().clone();
-        track(
-            profile_settings.clone().upcast(),
+        let profile_settings = init.profile.gsettings();
+        handlers.push(SignalGuard::new(
+            profile_settings,
             profile_settings.connect_changed(Some(crate::profile::key::PALETTE), move |_, _| {
                 input.emit(InspectorInput::Palette)
             }),
-        );
+        ));
         let input = sender.input_sender().clone();
         let style_manager = adw::StyleManager::default();
-        track(
-            style_manager.clone().upcast(),
+        handlers.push(SignalGuard::new(
+            &style_manager,
             style_manager.connect_dark_notify(move |_| input.emit(InspectorInput::Palette)),
-        );
+        ));
 
         // VTE has no grid-size signal (the C terminal emits its own from
         // size_allocate), so watch the counts once per frame.
@@ -427,9 +408,7 @@ impl Component for Inspector {
     }
 
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
-        for (object, id) in self.handlers.drain(..) {
-            object.disconnect(id);
-        }
+        self.handlers.clear();
         if let Some(tick) = self.tick.take() {
             tick.remove();
         }

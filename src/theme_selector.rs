@@ -23,6 +23,7 @@
 use gtk::prelude::*;
 
 use crate::settings::InterfaceStyle;
+use crate::signal_guard::{SignalGuard, drop_on_destroy};
 
 const CSS_NAME: &str = "themeselector";
 const BUTTON_CSS_CLASS: &str = "theme-selector";
@@ -104,15 +105,12 @@ pub fn theme_selector(action_name: &str) -> gtk::Box {
         }
     };
     update_dark(&style_manager);
-    let handlers = std::cell::Cell::new(Some([
+    let handlers = [
         style_manager.connect_system_supports_color_schemes_notify(update_follow),
         style_manager.connect_dark_notify(update_dark),
-    ]));
-    root.connect_destroy(move |_| {
-        for id in handlers.take().into_iter().flatten() {
-            adw::StyleManager::default().disconnect(id);
-        }
-    });
+    ]
+    .map(|id| SignalGuard::new(&style_manager, id));
+    drop_on_destroy(&root, handlers);
     root
 }
 

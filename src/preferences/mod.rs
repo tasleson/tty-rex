@@ -47,6 +47,7 @@ use crate::palette_preview::PalettePreview;
 use crate::profile::{self, Profile, Profiles};
 use crate::settings::{AppSettings, key, tty_rex_key};
 use crate::shortcuts;
+use crate::signal_guard::SignalGuard;
 
 const DEFAULT_HEIGHT: i32 = 700;
 const MIN_WIDTH: i32 = 360;
@@ -145,7 +146,7 @@ pub struct Preferences {
     /// Profiles shown in the list, kept alive for their label handlers.
     listed_profiles: Vec<Profile>,
     /// Handlers on shared objects, disconnected on shutdown.
-    shared_handlers: Vec<(glib::Object, glib::SignalHandlerId)>,
+    shared_handlers: Vec<SignalGuard>,
     _palette_monitors: Vec<gio::FileMonitor>,
     palette_reload: Option<glib::SourceId>,
 }
@@ -662,35 +663,45 @@ impl Component for Preferences {
 
         let mut shared_handlers = Vec::new();
         let changed = input.clone();
-        let id = gsettings.connect_changed(Some(key::PROFILE_UUIDS), move |_, _| {
-            changed.emit(PreferencesInput::ProfilesChanged)
-        });
-        shared_handlers.push((gsettings.clone().upcast(), id));
+        shared_handlers.push(SignalGuard::new(
+            &gsettings,
+            gsettings.connect_changed(Some(key::PROFILE_UUIDS), move |_, _| {
+                changed.emit(PreferencesInput::ProfilesChanged)
+            }),
+        ));
         let changed = input.clone();
-        let id = gsettings.connect_changed(Some(key::DEFAULT_PROFILE_UUID), move |_, _| {
-            changed.emit(PreferencesInput::DefaultProfileChanged)
-        });
-        shared_handlers.push((gsettings.clone().upcast(), id));
+        shared_handlers.push(SignalGuard::new(
+            &gsettings,
+            gsettings.connect_changed(Some(key::DEFAULT_PROFILE_UUID), move |_, _| {
+                changed.emit(PreferencesInput::DefaultProfileChanged)
+            }),
+        ));
         let changed = input.clone();
-        let id = gsettings.connect_changed(None, move |_, key| {
-            if matches!(key, key::FONT_NAME | key::USE_SYSTEM_FONT) {
-                changed.emit(PreferencesInput::RefreshPalettes)
-            }
-        });
-        shared_handlers.push((gsettings.clone().upcast(), id));
+        shared_handlers.push(SignalGuard::new(
+            &gsettings,
+            gsettings.connect_changed(None, move |_, key| {
+                if matches!(key, key::FONT_NAME | key::USE_SYSTEM_FONT) {
+                    changed.emit(PreferencesInput::RefreshPalettes)
+                }
+            }),
+        ));
         let tty_rex_settings = init.settings.tty_rex_gsettings().clone();
         let changed = input.clone();
-        let id = tty_rex_settings.connect_changed(None, move |_, key| {
-            if tty_rex_key::COLOR_KEYS.contains(&key) {
-                changed.emit(PreferencesInput::HighlightColorsChanged)
-            }
-        });
-        shared_handlers.push((tty_rex_settings.upcast(), id));
+        shared_handlers.push(SignalGuard::new(
+            &tty_rex_settings,
+            tty_rex_settings.connect_changed(None, move |_, key| {
+                if tty_rex_key::COLOR_KEYS.contains(&key) {
+                    changed.emit(PreferencesInput::HighlightColorsChanged)
+                }
+            }),
+        ));
         let style_manager = adw::StyleManager::default();
         let changed = input.clone();
-        let id = style_manager
-            .connect_dark_notify(move |_| changed.emit(PreferencesInput::RefreshPalettes));
-        shared_handlers.push((style_manager.upcast(), id));
+        shared_handlers.push(SignalGuard::new(
+            &style_manager,
+            style_manager
+                .connect_dark_notify(move |_| changed.emit(PreferencesInput::RefreshPalettes)),
+        ));
 
         let palette_monitors =
             palette::user_palettes_dirs(&glib::user_data_dir(), crate::config::APP_ID)
@@ -817,9 +828,7 @@ impl Component for Preferences {
         if let Some(source) = self.palette_reload.take() {
             source.remove();
         }
-        for (object, id) in self.shared_handlers.drain(..) {
-            object.disconnect(id);
-        }
+        self.shared_handlers.clear();
     }
 }
 

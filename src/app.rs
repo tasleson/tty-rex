@@ -48,6 +48,7 @@ use crate::preferences::{Preferences, PreferencesInit, PreferencesInput};
 use crate::profile::{Profile, Profiles};
 use crate::session::{self, RestoreOptions, Session, SessionTab, SessionWindow};
 use crate::settings::{self, AppSettings, SettingsError};
+use crate::signal_guard::SignalGuard;
 use crate::spawn::{self, HostSpawner, Spawner};
 use crate::tab::{Tab, TabInit, TabInput};
 use crate::telemetry::Pid;
@@ -186,8 +187,8 @@ pub struct App {
     containers: Containers,
     /// Shared by every window's "new tab" split button.
     profile_menu: gio::Menu,
-    /// Kept alive so their label-change handlers keep firing.
-    menu_profiles: RefCell<Vec<Profile>>,
+    /// The profiles the menu lists, with their label-change handlers.
+    menu_profiles: RefCell<Vec<MenuProfile>>,
     windows: RefCell<Vec<WindowEntry>>,
     tabs: RefCell<HashMap<gtk::Widget, TabHandle>>,
     /// `--title` given without other options, applied when activation
@@ -1076,13 +1077,21 @@ impl App {
     }
 }
 
+/// A profile in the new tab menu. It is kept alive, with a handler that
+/// rebuilds the menu when its label changes, until the next rebuild.
+struct MenuProfile {
+    _profile: Profile,
+    _label_handler: SignalGuard,
+}
+
 fn rebuild_profile_menu(app: &Weak<App>) {
     let Some(app) = app.upgrade() else {
         return;
     };
     let profiles = app.profiles.list();
     let section = gio::Menu::new();
-    for profile in &profiles {
+    let mut menu_profiles = Vec::with_capacity(profiles.len());
+    for profile in profiles {
         let item = RelmAction::<NewTabWithProfileAction>::to_menu_item_with_target_value(
             &profile.label(),
             &profile.uuid().to_owned(),
@@ -1090,11 +1099,15 @@ fn rebuild_profile_menu(app: &Weak<App>) {
         section.append_item(&item);
 
         let weak = Rc::downgrade(&app);
-        profile
+        let id = profile
             .gsettings()
             .connect_changed(Some(crate::profile::key::LABEL), move |_, _| {
                 rebuild_profile_menu(&weak)
             });
+        menu_profiles.push(MenuProfile {
+            _label_handler: SignalGuard::new(profile.gsettings(), id),
+            _profile: profile,
+        });
     }
     app.profile_menu.remove_all();
     let containers = menu_containers(app.containers.list());
@@ -1124,7 +1137,7 @@ fn rebuild_profile_menu(app: &Weak<App>) {
         app.profile_menu
             .append_section(Some(CONTAINERS_SECTION_TITLE), &section);
     }
-    *app.menu_profiles.borrow_mut() = profiles;
+    *app.menu_profiles.borrow_mut() = menu_profiles;
 }
 
 /// The named containers other than the host, by name, as the C window's

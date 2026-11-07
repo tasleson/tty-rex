@@ -48,6 +48,7 @@ use crate::palette;
 use crate::profile::Profile;
 use crate::profile_dialog::{CHANGE_PROFILE_LABEL, ProfileDialog};
 use crate::settings::{self, AppSettings, ExitAction};
+use crate::signal_guard::SignalGuard;
 use crate::spawn::{self, ChildExit, SpawnError, SpawnRequest, Spawner};
 use crate::tab_notify::{self, TabNotify};
 use crate::telemetry::Pid;
@@ -295,7 +296,6 @@ struct LeaderMonitor {
     delay: Cell<Duration>,
     /// The scheduled check and when it is due.
     pending: RefCell<Option<(glib::SourceId, Instant)>>,
-    stopped: Cell<bool>,
     sender: relm4::Sender<TabInput>,
 }
 
@@ -304,16 +304,12 @@ impl LeaderMonitor {
         Rc::new(Self {
             delay: Cell::new(POLL_DELAY_MIN),
             pending: RefCell::default(),
-            stopped: Cell::new(false),
             sender,
         })
     }
 
     /// Checks after `delay`, unless a check is already due by then.
     fn schedule(self: &Rc<Self>, delay: Duration) {
-        if self.stopped.get() {
-            return;
-        }
         let due = Instant::now() + delay;
         let mut pending = self.pending.borrow_mut();
         if pending.as_ref().is_some_and(|(_, at)| *at <= due) {
@@ -355,10 +351,11 @@ impl LeaderMonitor {
         self.delay.set(delay);
         self.schedule(delay);
     }
+}
 
-    fn stop(&self) {
-        self.stopped.set(true);
-        if let Some((id, _)) = self.pending.borrow_mut().take() {
+impl Drop for LeaderMonitor {
+    fn drop(&mut self) {
+        if let Some((id, _)) = self.pending.get_mut().take() {
             id.remove();
         }
     }
@@ -823,7 +820,7 @@ pub struct Tab {
     banner: adw::Banner,
     banner_action: BannerAction,
     /// Handlers on objects shared with other tabs, disconnected on shutdown.
-    shared_handlers: Vec<(glib::Object, glib::SignalHandlerId)>,
+    shared_handlers: Vec<SignalGuard>,
     inspector: Option<Controller<Inspector>>,
     title_dialog: Option<TitleDialog>,
     links: Links,
@@ -831,7 +828,7 @@ pub struct Tab {
     profile_dialog_serial: u32,
     profile_uuid: Rc<RefCell<String>>,
     /// The handler reporting changes of the current profile's settings.
-    profile_handler: Option<glib::SignalHandlerId>,
+    profile_handler: Option<SignalGuard>,
     /// Identifies the current title dialog, so a late "closed" message from
     /// a dialog that was force-closed cannot clear its successor.
     title_dialog_serial: u32,
@@ -1261,14 +1258,22 @@ impl Component for Tab {
         terminal::connect_commit_bytes(&terminal, move || pressed.set(true));
 
         let leader_monitor = LeaderMonitor::new(sender.input_sender().clone());
-        let monitor = Rc::clone(&leader_monitor);
-        terminal.connect_contents_changed(move |_| monitor.contents_changed());
+        // Weak, so the monitor (and its pending check) goes with the tab
+        // rather than with the terminal and controller that call it.
+        let monitor = Rc::downgrade(&leader_monitor);
+        terminal.connect_contents_changed(move |_| {
+            if let Some(monitor) = monitor.upgrade() {
+                monitor.contents_changed();
+            }
+        });
         // Capture phase sees keys before the terminal consumes them.
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let monitor = Rc::clone(&leader_monitor);
+        let monitor = Rc::downgrade(&leader_monitor);
         keys.connect_key_pressed(move |_, key, _, state| {
-            if is_interactive_key(key, state) {
+            if is_interactive_key(key, state)
+                && let Some(monitor) = monitor.upgrade()
+            {
                 monitor.interactive_key();
             }
             glib::Propagation::Proceed
@@ -1308,47 +1313,52 @@ impl Component for Tab {
         root.connect_unrealize(move |_| input.emit(TabInput::Unrealized));
 
         let input = sender.input_sender().clone();
-        let profile_handler = init
-            .profile
-            .gsettings()
-            .connect_changed(None, move |_, _| input.emit(TabInput::ProfileChanged));
+        let profile_handler = SignalGuard::new(
+            init.profile.gsettings(),
+            init.profile
+                .gsettings()
+                .connect_changed(None, move |_, _| input.emit(TabInput::ProfileChanged)),
+        );
 
         let mut shared_handlers = Vec::new();
         let input = sender.input_sender().clone();
-        let id = init
-            .app_settings
-            .gsettings()
-            .connect_changed(None, move |_, _| input.emit(TabInput::AppSettingsChanged));
-        shared_handlers.push((init.app_settings.gsettings().clone().upcast(), id));
+        let gsettings = init.app_settings.gsettings();
+        shared_handlers.push(SignalGuard::new(
+            gsettings,
+            gsettings.connect_changed(None, move |_, _| input.emit(TabInput::AppSettingsChanged)),
+        ));
         let input = sender.input_sender().clone();
-        let id = init
-            .app_settings
-            .gsettings()
-            .connect_changed(Some(settings::key::INHIBIT_LOGOUT), move |_, _| {
+        shared_handlers.push(SignalGuard::new(
+            gsettings,
+            gsettings.connect_changed(Some(settings::key::INHIBIT_LOGOUT), move |_, _| {
                 input.emit(TabInput::InhibitLogoutChanged)
-            });
-        shared_handlers.push((init.app_settings.gsettings().clone().upcast(), id));
+            }),
+        ));
         let input = sender.input_sender().clone();
         let tty_rex_settings = init.app_settings.tty_rex_gsettings();
-        let id = tty_rex_settings.connect_changed(None, move |_, key| {
-            if settings::tty_rex_key::COLOR_KEYS.contains(&key) {
-                input.emit(TabInput::HighlightColorsChanged)
-            }
-        });
-        shared_handlers.push((tty_rex_settings.clone().upcast(), id));
+        shared_handlers.push(SignalGuard::new(
+            tty_rex_settings,
+            tty_rex_settings.connect_changed(None, move |_, key| {
+                if settings::tty_rex_key::COLOR_KEYS.contains(&key) {
+                    input.emit(TabInput::HighlightColorsChanged)
+                }
+            }),
+        ));
         if let Some(desktop) = init.app_settings.desktop_settings() {
             let input = sender.input_sender().clone();
-            let id = desktop
-                .connect_changed(Some(settings::DESKTOP_MONOSPACE_FONT_KEY), move |_, _| {
+            shared_handlers.push(SignalGuard::new(
+                desktop,
+                desktop.connect_changed(Some(settings::DESKTOP_MONOSPACE_FONT_KEY), move |_, _| {
                     input.emit(TabInput::AppSettingsChanged)
-                });
-            shared_handlers.push((desktop.clone().upcast(), id));
+                }),
+            ));
         }
         let style_manager = adw::StyleManager::default();
         let input = sender.input_sender().clone();
-        let id =
-            style_manager.connect_dark_notify(move |_| input.emit(TabInput::AppearanceChanged));
-        shared_handlers.push((style_manager.upcast(), id));
+        shared_handlers.push(SignalGuard::new(
+            &style_manager,
+            style_manager.connect_dark_notify(move |_| input.emit(TabInput::AppearanceChanged)),
+        ));
 
         terminal::apply_app_settings(&terminal, &init.app_settings);
         terminal::apply_profile(&terminal, &init.profile);
@@ -1525,15 +1535,13 @@ impl Component for Tab {
                 if profile.uuid() == self.profile.uuid() {
                     return;
                 }
-                if let Some(id) = self.profile_handler.take() {
-                    self.profile.gsettings().disconnect(id);
-                }
                 let input = sender.input_sender().clone();
-                self.profile_handler = Some(
+                self.profile_handler = Some(SignalGuard::new(
+                    profile.gsettings(),
                     profile
                         .gsettings()
                         .connect_changed(None, move |_, _| input.emit(TabInput::ProfileChanged)),
-                );
+                ));
                 *self.profile_uuid.borrow_mut() = profile.uuid().to_owned();
                 self.profile = profile;
                 self.links
@@ -1668,7 +1676,6 @@ impl Component for Tab {
     }
 
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
-        self.leader_monitor.stop();
         // As in ptyxis_tab_dispose().
         self.logout_inhibit = None;
         // The inspector describes this terminal, so it goes with the tab.
@@ -1681,13 +1688,9 @@ impl Component for Tab {
         if let Some(dialog) = self.profile_dialog.take() {
             dialog.force_close();
         }
-        if let Some(id) = self.profile_handler.take() {
-            self.profile.gsettings().disconnect(id);
-        }
+        self.profile_handler = None;
         self.cancel_color_dialog();
-        for (object, id) in self.shared_handlers.drain(..) {
-            object.disconnect(id);
-        }
+        self.shared_handlers.clear();
     }
 }
 

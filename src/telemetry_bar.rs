@@ -32,6 +32,7 @@ use gtk::prelude::*;
 use relm4::prelude::*;
 
 use crate::settings::{AppSettings, tty_rex_key};
+use crate::signal_guard::SignalGuard;
 use crate::telemetry::{PLACEHOLDER, Pid, ReadingKind, Readings, Sampler};
 
 /// Space between readings, and between a reading's label and value.
@@ -77,7 +78,7 @@ pub struct TelemetryBar {
     /// Each reading with its label and the text the label shows, so an
     /// unchanged value does not touch the widget.
     values: Vec<(ReadingKind, gtk::Label, String)>,
-    settings_handler: Option<glib::SignalHandlerId>,
+    _settings_handler: SignalGuard,
 }
 
 /// Shows `text` in `label` unless it already does.
@@ -209,11 +210,13 @@ impl Component for TelemetryBar {
         root.append(&readings);
 
         let input = sender.input_sender().clone();
-        let settings_handler = settings
-            .tty_rex_gsettings()
-            .connect_changed(Some(tty_rex_key::TELEMETRY_INTERVAL), move |_, _| {
+        let gsettings = settings.tty_rex_gsettings();
+        let settings_handler = SignalGuard::new(
+            gsettings,
+            gsettings.connect_changed(Some(tty_rex_key::TELEMETRY_INTERVAL), move |_, _| {
                 input.emit(TelemetryBarInput::IntervalChanged)
-            });
+            }),
+        );
 
         let model = TelemetryBar {
             settings,
@@ -223,7 +226,7 @@ impl Component for TelemetryBar {
             generation: 0,
             timer: None,
             values,
-            settings_handler: Some(settings_handler),
+            _settings_handler: settings_handler,
         };
         ComponentParts { model, widgets: () }
     }
@@ -294,8 +297,5 @@ impl Component for TelemetryBar {
 
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
         self.stop_timer();
-        if let Some(id) = self.settings_handler.take() {
-            self.settings.tty_rex_gsettings().disconnect(id);
-        }
     }
 }
