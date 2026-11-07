@@ -300,6 +300,21 @@ const REGEX_EMAIL: &str = concat!(defs!(), "(?i:mailto:)?", user!(), "@", email_
 /// The predefined patterns, in the order of `url_regexes_str`.
 const URL_PATTERNS: [&str; 4] = [REGEX_URL_AS_IS, REGEX_URL_HTTP, REGEX_URL_FILE, REGEX_EMAIL];
 
+thread_local! {
+    /// The predefined patterns, compiled and JITted once for every terminal.
+    /// A pattern that fails to compile is left out (with a warning).
+    static PREDEFINED: Vec<vte::Regex> = URL_PATTERNS
+        .iter()
+        .filter_map(|pattern| match compile(pattern) {
+            Ok(regex) => Some(regex),
+            Err(e) => {
+                glib::g_warning!("tty-rex", "Failed to compile regex: {e}");
+                None
+            }
+        })
+        .collect();
+}
+
 fn compile(pattern: &str) -> Result<vte::Regex, glib::Error> {
     let regex = vte::Regex::for_match(pattern, REGEX_FLAGS)?;
     // Like the C build, only a warning when the JIT is unavailable.
@@ -358,15 +373,12 @@ impl Links {
             terminal.match_set_cursor_name(tag, URL_MATCH_CURSOR_NAME);
             custom.insert(tag, (regex, link.clone()));
         }
-        for pattern in URL_PATTERNS {
-            match compile(pattern) {
-                Ok(regex) => {
-                    let tag = terminal.match_add_regex(&regex, 0);
-                    terminal.match_set_cursor_name(tag, URL_MATCH_CURSOR_NAME);
-                }
-                Err(e) => glib::g_warning!("tty-rex", "Failed to compile regex: {e}"),
+        PREDEFINED.with(|regexes| {
+            for regex in regexes {
+                let tag = terminal.match_add_regex(regex, 0);
+                terminal.match_set_cursor_name(tag, URL_MATCH_CURSOR_NAME);
             }
-        }
+        });
     }
 
     /// The link at the widget coordinates `x`, `y`: an OSC 8 hyperlink
