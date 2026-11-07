@@ -185,6 +185,20 @@ pub fn foreground_of(pgrp: i32, child_pid: Option<i32>) -> Option<Foreground> {
     })
 }
 
+/// [`foreground_of`] for a caller that already read the command line of
+/// `pgrp`: it moves out of `cmdline` into the result, and stays put when
+/// `pgrp` is the tab's own child and there is no foreground program.
+pub fn foreground_with_cmdline(
+    pgrp: i32,
+    child_pid: Option<i32>,
+    cmdline: &mut Option<String>,
+) -> Option<Foreground> {
+    (pgrp != child_pid?).then(|| Foreground {
+        pid: pgrp,
+        cmdline: cmdline.take(),
+    })
+}
+
 /// The command line of process `pid` as printed by
 /// `get_cmdline_for_pid()`, or `None` if it cannot be read.
 pub fn process_cmdline(pid: i32) -> Option<String> {

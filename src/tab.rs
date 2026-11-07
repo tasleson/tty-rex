@@ -1023,14 +1023,22 @@ impl Tab {
         let new_process = std::mem::replace(&mut self.leader_pgrp, pgrp) != pgrp;
         let changed = self.set_leader_kind(kind, root) | new_process;
         if running {
-            self.command_line = pgrp.and_then(leader::process_cmdline).unwrap_or_default();
-            let foreground =
-                pgrp.and_then(|pgrp| leader::foreground_of(pgrp, self.child_pid.get()));
-            let foreground = ForegroundState::new(foreground.as_ref());
+            // Read once for both the tab's command line and the foreground.
+            let mut cmdline = pgrp.and_then(leader::process_cmdline);
+            let foreground = pgrp.and_then(|pgrp| {
+                leader::foreground_with_cmdline(pgrp, self.child_pid.get(), &mut cmdline)
+            });
+            let state = ForegroundState::new(foreground.as_ref());
+            let cmdline = foreground
+                .map_or(cmdline, |f| f.cmdline)
+                .unwrap_or_default();
+            if self.command_line != cmdline {
+                self.command_line = cmdline;
+            }
             // Like ptyxis_tab_poll_agent_cb(), only a different program
             // revisits the inhibition.
-            if foreground != self.foreground {
-                self.foreground = foreground;
+            if state != self.foreground {
+                self.foreground = state;
                 self.update_logout_inhibit(root);
             }
             self.leader_monitor.polled(changed);
