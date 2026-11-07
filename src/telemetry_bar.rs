@@ -74,20 +74,30 @@ pub struct TelemetryBar {
     /// started before is discarded along with its baseline.
     generation: u64,
     timer: Option<glib::SourceId>,
-    values: Vec<(ReadingKind, gtk::Label)>,
+    /// Each reading with its label and the text the label shows, so an
+    /// unchanged value does not touch the widget.
+    values: Vec<(ReadingKind, gtk::Label, String)>,
     settings_handler: Option<glib::SignalHandlerId>,
 }
 
+/// Shows `text` in `label` unless it already does.
+fn set_text(label: &gtk::Label, shown: &mut String, text: String) {
+    if *shown != text {
+        label.set_label(&text);
+        *shown = text;
+    }
+}
+
 impl TelemetryBar {
-    fn show(&self, readings: &Readings) {
-        for (kind, label) in &self.values {
-            label.set_label(&readings.text(*kind));
+    fn show(&mut self, readings: &Readings) {
+        for (kind, label, shown) in &mut self.values {
+            set_text(label, shown, readings.text(*kind));
         }
     }
 
-    fn clear(&self) {
-        for (_, label) in &self.values {
-            label.set_label(PLACEHOLDER);
+    fn clear(&mut self) {
+        for (_, label, shown) in &mut self.values {
+            set_text(label, shown, PLACEHOLDER.to_owned());
         }
     }
 
@@ -112,8 +122,8 @@ impl TelemetryBar {
     /// Drops the baseline; the next sample starts a new one.
     fn restart(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        if self.sampler.is_some() {
-            self.sampler = Some(Sampler::new());
+        if let Some(sampler) = &mut self.sampler {
+            sampler.reset();
         }
         self.clear();
     }
@@ -128,7 +138,8 @@ impl TelemetryBar {
         };
         let Some(pid) = self.pid_source.as_ref().and_then(|source| source.get()) else {
             // Nothing running in the tab (yet, or any more).
-            self.sampler = Some(Sampler::new());
+            sampler.reset();
+            self.sampler = Some(sampler);
             self.clear();
             return;
         };
@@ -191,7 +202,7 @@ impl Component for TelemetryBar {
                     .build();
                 reading.append(&value);
                 readings.append(&reading);
-                (kind, value)
+                (kind, value, PLACEHOLDER.to_owned())
             })
             .collect();
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
@@ -266,7 +277,9 @@ impl Component for TelemetryBar {
         } else {
             // Its baseline belongs to another tab or an earlier showing;
             // start the current one's right away rather than a tick late.
-            self.sampler = Some(Sampler::new());
+            let mut sampler = done.sampler;
+            sampler.reset();
+            self.sampler = Some(sampler);
             self.tick(&sender);
         }
     }

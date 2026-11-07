@@ -63,23 +63,36 @@ pub struct ProcStat {
 /// parentheses, so the fields are counted from its last `)`.
 pub fn parse_stat(contents: &str) -> Option<ProcStat> {
     let rest = &contents[contents.rfind(')')? + 1..];
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    let field = |number: usize| -> Option<u64> {
-        fields
-            .get(number.checked_sub(stat_field::FIRST_AFTER_COMM)?)?
-            .parse()
-            .ok()
+    let mut fields = rest.split_ascii_whitespace();
+    // Each step skips to the wanted field from the one just consumed.
+    let mut field = |number: usize, consumed: usize| -> Option<u64> {
+        fields.nth(number - consumed - 1)?.parse().ok()
     };
+    let ppid = field(stat_field::PPID, stat_field::FIRST_AFTER_COMM - 1)?;
+    let utime = field(stat_field::UTIME, stat_field::PPID)?;
+    let stime = field(stat_field::STIME, stat_field::UTIME)?;
+    let start_time = field(stat_field::STARTTIME, stat_field::STIME)?;
     Some(ProcStat {
-        ppid: Pid::try_from(field(stat_field::PPID)?).ok()?,
-        cpu_ticks: field(stat_field::UTIME)?.checked_add(field(stat_field::STIME)?)?,
-        start_time: field(stat_field::STARTTIME)?,
+        ppid: Pid::try_from(ppid).ok()?,
+        cpu_ticks: utime.checked_add(stime)?,
+        start_time,
     })
+}
+
+/// Reads the file at `path` into `buffer`, replacing its contents, so
+/// repeated reads share one allocation. `None` when it cannot be read
+/// as UTF-8.
+pub fn read_into<'a>(path: &Path, buffer: &'a mut String) -> Option<&'a str> {
+    use std::io::Read;
+
+    buffer.clear();
+    fs::File::open(path).ok()?.read_to_string(buffer).ok()?;
+    Some(buffer)
 }
 
 /// Reads every process's stat. Only failing to list `/proc` is an error;
 /// processes vanishing while it is scanned are left out.
-pub fn scan_processes() -> io::Result<HashMap<Pid, ProcStat>> {
+pub fn scan_processes(buffer: &mut String) -> io::Result<HashMap<Pid, ProcStat>> {
     let mut processes = HashMap::new();
     for entry in fs::read_dir(PROC_DIR)? {
         let Ok(entry) = entry else {
@@ -92,11 +105,7 @@ pub fn scan_processes() -> io::Result<HashMap<Pid, ProcStat>> {
         else {
             continue;
         };
-        if let Some(stat) = fs::read_to_string(entry.path().join("stat"))
-            .ok()
-            .as_deref()
-            .and_then(parse_stat)
-        {
+        if let Some(stat) = read_into(&entry.path().join("stat"), buffer).and_then(parse_stat) {
             processes.insert(pid, stat);
         }
     }
@@ -150,14 +159,12 @@ pub fn parse_statm_resident(statm: &str) -> Option<u64> {
 /// shared within the tree are not counted repeatedly, or its resident set
 /// size where `smaps_rollup` is not readable (other users' processes,
 /// kernels before 4.14).
-pub fn memory_bytes(pid: Pid, page_size: u64) -> Option<u64> {
+pub fn memory_bytes(pid: Pid, page_size: u64, buffer: &mut String) -> Option<u64> {
     let dir = Path::new(PROC_DIR).join(pid.to_string());
-    fs::read_to_string(dir.join("smaps_rollup"))
-        .ok()
-        .as_deref()
+    read_into(&dir.join("smaps_rollup"), buffer)
         .and_then(parse_pss)
         .or_else(|| {
-            let pages = parse_statm_resident(&fs::read_to_string(dir.join("statm")).ok()?)?;
+            let pages = parse_statm_resident(read_into(&dir.join("statm"), buffer)?)?;
             Some(pages.saturating_mul(page_size))
         })
 }

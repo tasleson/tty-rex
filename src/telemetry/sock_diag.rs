@@ -223,6 +223,7 @@ pub fn parse_batch(batch: &[u8], mut on_socket: impl FnMut(u64, &[u8])) -> io::R
 }
 
 /// A netlink socket connected to the kernel's sock_diag.
+#[derive(Debug)]
 struct DiagSocket(OwnedFd);
 
 impl DiagSocket {
@@ -324,33 +325,56 @@ impl DiagSocket {
     }
 }
 
-/// Byte counters of the TCP sockets among `inodes` (IPv4 and IPv6).
-/// Sockets without `tcp_info` counters are left out.
-pub fn tcp_counters(inodes: &HashSet<u64>) -> io::Result<HashMap<u64, TcpCounters>> {
-    let mut counters = HashMap::new();
-    if inodes.is_empty() {
-        return Ok(counters);
+/// Reads TCP byte counters, keeping its netlink socket and receive buffer
+/// between calls instead of setting them up for every sample.
+#[derive(Debug, Default)]
+pub struct DiagClient {
+    /// Opened on first use; dropped after an error, as an unfinished dump
+    /// may leave replies queued on it.
+    socket: Option<DiagSocket>,
+    buffer: Vec<u8>,
+}
+
+impl DiagClient {
+    /// Byte counters of the TCP sockets among `inodes` (IPv4 and IPv6).
+    /// Sockets without `tcp_info` counters are left out.
+    pub fn tcp_counters(&mut self, inodes: &HashSet<u64>) -> io::Result<HashMap<u64, TcpCounters>> {
+        if inodes.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let result = self.dump(inodes);
+        if result.is_err() {
+            self.socket = None;
+        }
+        result
     }
-    let socket = DiagSocket::open()?;
-    let mut buffer = vec![0; RECV_BUFFER_LEN];
-    for (sequence, family) in [libc::AF_INET, libc::AF_INET6].into_iter().enumerate() {
-        socket.send(&build_request(family as u8, sequence as u32 + 1))?;
-        loop {
-            let len = socket.receive(&mut buffer)?;
-            let progress = parse_batch(&buffer[..len], |inode, attributes| {
-                if inodes.contains(&inode)
-                    && let Some(info) = find_attribute(attributes, INET_DIAG_INFO)
-                    && let Some(socket_counters) = tcp_info_counters(info)
-                {
-                    counters.insert(inode, socket_counters);
+
+    fn dump(&mut self, inodes: &HashSet<u64>) -> io::Result<HashMap<u64, TcpCounters>> {
+        let socket = match &mut self.socket {
+            Some(socket) => socket,
+            none => none.insert(DiagSocket::open()?),
+        };
+        self.buffer.resize(RECV_BUFFER_LEN, 0);
+        let mut counters = HashMap::new();
+        for (sequence, family) in [libc::AF_INET, libc::AF_INET6].into_iter().enumerate() {
+            socket.send(&build_request(family as u8, sequence as u32 + 1))?;
+            loop {
+                let len = socket.receive(&mut self.buffer)?;
+                let progress = parse_batch(&self.buffer[..len], |inode, attributes| {
+                    if inodes.contains(&inode)
+                        && let Some(info) = find_attribute(attributes, INET_DIAG_INFO)
+                        && let Some(socket_counters) = tcp_info_counters(info)
+                    {
+                        counters.insert(inode, socket_counters);
+                    }
+                })?;
+                if progress == Progress::Done {
+                    break;
                 }
-            })?;
-            if progress == Progress::Done {
-                break;
             }
         }
+        Ok(counters)
     }
-    Ok(counters)
 }
 
 #[cfg(test)]

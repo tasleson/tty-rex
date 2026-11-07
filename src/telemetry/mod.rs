@@ -42,6 +42,7 @@ pub mod sock_diag;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -209,6 +210,18 @@ impl WarnOnce {
 static PROC_WARNING: WarnOnce = WarnOnce::new();
 static SOCK_DIAG_WARNING: WarnOnce = WarnOnce::new();
 
+/// Page size in bytes, which cannot change while running.
+fn page_size() -> u64 {
+    static PAGE_SIZE: OnceLock<u64> = OnceLock::new();
+    *PAGE_SIZE.get_or_init(|| sysconf(libc::_SC_PAGESIZE, FALLBACK_PAGE_SIZE))
+}
+
+/// Clock ticks per second, which cannot change while running.
+fn clock_ticks() -> u64 {
+    static CLOCK_TICKS: OnceLock<u64> = OnceLock::new();
+    *CLOCK_TICKS.get_or_init(|| sysconf(libc::_SC_CLK_TCK, FALLBACK_CLOCK_TICKS))
+}
+
 fn sysconf(name: libc::c_int, fallback: u64) -> u64 {
     // SAFETY: sysconf() has no preconditions.
     u64::try_from(unsafe { libc::sysconf(name) })
@@ -235,6 +248,9 @@ struct Snapshot {
 #[derive(Debug, Default)]
 pub struct Sampler {
     baseline: Option<Snapshot>,
+    /// Kept between samples so each one reuses the same allocations.
+    diag: sock_diag::DiagClient,
+    read_buffer: String,
 }
 
 impl Sampler {
@@ -242,11 +258,16 @@ impl Sampler {
         Self::default()
     }
 
+    /// Forgets the baseline, so the next sample starts a new one.
+    pub fn reset(&mut self) {
+        self.baseline = None;
+    }
+
     /// Samples the tree rooted at `root`. Changing the root starts over
     /// with a baseline. Never fails: what cannot be read is `None`.
     pub fn sample(&mut self, root: Pid) -> Readings {
         let taken = Instant::now();
-        let processes = match procfs::scan_processes() {
+        let processes = match procfs::scan_processes(&mut self.read_buffer) {
             Ok(processes) => processes,
             Err(e) => {
                 PROC_WARNING.warn(|| format!("Telemetry cannot read /proc: {e}"));
@@ -260,7 +281,7 @@ impl Sampler {
             return Readings::default();
         }
 
-        let page_size = sysconf(libc::_SC_PAGESIZE, FALLBACK_PAGE_SIZE);
+        let page_size = page_size();
         let mut cpu_ticks = HashMap::with_capacity(tree.len());
         let mut memory = None;
         let mut inodes = HashSet::new();
@@ -269,12 +290,12 @@ impl Sampler {
                 continue;
             };
             cpu_ticks.insert((pid, stat.start_time), stat.cpu_ticks);
-            if let Some(bytes) = procfs::memory_bytes(pid, page_size) {
+            if let Some(bytes) = procfs::memory_bytes(pid, page_size, &mut self.read_buffer) {
                 memory = Some(memory.unwrap_or(0u64).saturating_add(bytes));
             }
             procfs::collect_socket_inodes(pid, &mut inodes);
         }
-        let sockets = match sock_diag::tcp_counters(&inodes) {
+        let sockets = match self.diag.tcp_counters(&inodes) {
             Ok(counters) => Some(counters.into_iter().fold(
                 (HashMap::new(), HashMap::new()),
                 |(mut sent, mut received), (inode, c)| {
@@ -305,7 +326,7 @@ impl Sampler {
             readings.cpu_percent = cpu_percent(
                 counter_growth(&previous.cpu_ticks, &current.cpu_ticks),
                 elapsed,
-                sysconf(libc::_SC_CLK_TCK, FALLBACK_CLOCK_TICKS),
+                clock_ticks(),
                 cores,
             );
             if let (Some((sent0, received0)), Some((sent1, received1))) =
