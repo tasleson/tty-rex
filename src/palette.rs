@@ -492,9 +492,16 @@ fn load_user_palette(id: &str, path: &Path) -> Result<Option<Rc<Palette>>, Strin
         static CACHE: RefCell<HashMap<PathBuf, CachedUserPalette>> = RefCell::default();
     }
 
-    let Ok(meta) = std::fs::metadata(path) else {
-        CACHE.with_borrow_mut(|cache| cache.remove(path));
-        return Ok(None);
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            CACHE.with_borrow_mut(|cache| cache.remove(path));
+            return if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(format!("{}: {e}", path.display()))
+            };
+        }
     };
     let (modified, len) = (meta.modified().ok(), meta.len());
     let hit = CACHE.with_borrow(|cache| {
@@ -506,8 +513,10 @@ fn load_user_palette(id: &str, path: &Path) -> Result<Option<Rc<Palette>>, Strin
     if hit.is_some() {
         return Ok(hit);
     }
-    let Ok(data) = std::fs::read_to_string(path) else {
-        return Ok(None);
+    let data = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let palette =
         Rc::new(Palette::parse(id, &path.display().to_string(), &data).map_err(|e| e.to_string())?);
