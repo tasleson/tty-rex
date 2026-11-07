@@ -33,7 +33,7 @@
 //! An agent-backed spawner will need more than the trait carries today:
 //! a way to cancel an in-flight spawn when the tab closes first.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -532,18 +532,18 @@ fn spawn_on_host(
 
 /// Delivers the next `child-exited` emission to `on_exit` exactly once.
 fn watch_child_exit(terminal: &vte::Terminal, on_exit: ExitCallback) {
-    let handler = Rc::new(RefCell::new(None::<glib::SignalHandlerId>));
-    let on_exit = RefCell::new(Some(on_exit));
+    let handler: Rc<Cell<Option<glib::SignalHandlerId>>> = Rc::default();
+    let on_exit = Cell::new(Some(on_exit));
     let handler_slot = Rc::clone(&handler);
     let id = terminal.connect_child_exited(move |terminal, status| {
-        if let Some(id) = handler_slot.borrow_mut().take() {
+        if let Some(id) = handler_slot.take() {
             terminal.disconnect(id);
         }
-        if let Some(on_exit) = on_exit.borrow_mut().take() {
+        if let Some(on_exit) = on_exit.take() {
             on_exit(ChildExit::from_wait_status(status));
         }
     });
-    *handler.borrow_mut() = Some(id);
+    handler.set(Some(id));
 }
 
 #[cfg(test)]
