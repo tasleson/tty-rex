@@ -104,7 +104,7 @@ struct TabHandle {
     /// Identifies the tab to `app.focus-tab-by-uuid`.
     uuid: String,
     terminal: vte::Terminal,
-    profile_uuid: String,
+    profile_uuid: Rc<RefCell<String>>,
     zoom: Rc<Cell<ZoomLevel>>,
     color: Rc<Cell<Option<gdk::RGBA>>>,
     child_pid: Rc<Cell<Option<Pid>>>,
@@ -412,6 +412,16 @@ impl App {
         &self.settings
     }
 
+    /// Every configured profile, for the "Change Profile" dialog.
+    pub fn profile_list(&self) -> Vec<Profile> {
+        self.profiles.list()
+    }
+
+    /// How many profiles there are (`win.set-profile` needs more than one).
+    pub fn profile_count(&self) -> usize {
+        self.profiles.uuids().len()
+    }
+
     pub fn profile_menu(&self) -> &gio::Menu {
         &self.profile_menu
     }
@@ -431,7 +441,7 @@ impl App {
     /// Launches a tab component and returns its root widget for a page.
     pub fn create_tab(&self, request: TabRequest) -> Result<gtk::Widget, SettingsError> {
         let profile = self.profiles.profile(request.profile_uuid.as_deref())?;
-        let profile_uuid = profile.uuid().to_owned();
+        let profile_uuid = Rc::new(RefCell::new(profile.uuid().to_owned()));
         let uuid = glib::uuid_string_random().to_string();
         let zoom = Rc::new(Cell::new(request.zoom));
         let color = Rc::new(Cell::new(None));
@@ -445,6 +455,7 @@ impl App {
             .launch(TabInit {
                 uuid: uuid.clone(),
                 profile,
+                profile_uuid: Rc::clone(&profile_uuid),
                 app_settings: self.settings.clone(),
                 spawner: Rc::clone(&self.spawner),
                 containers: self.containers.clone(),
@@ -490,7 +501,7 @@ impl App {
         self.tabs.borrow().get(child).map(|handle| TabRef {
             sender: handle.controller.sender().clone(),
             terminal: handle.terminal.clone(),
-            profile_uuid: handle.profile_uuid.clone(),
+            profile_uuid: handle.profile_uuid.borrow().clone(),
             zoom: Rc::clone(&handle.zoom),
             color: Rc::clone(&handle.color),
             css_class: handle.css_class.clone(),
@@ -682,12 +693,12 @@ impl App {
         let terminal = &handle.terminal;
         let profile_default = self
             .profiles
-            .profile(Some(&handle.profile_uuid))
+            .profile(Some(&handle.profile_uuid.borrow()))
             .map(|p| p.default_container())
             .unwrap_or_default();
         let container = handle.container.borrow();
         Some(SessionTab {
-            profile: Some(handle.profile_uuid.clone()),
+            profile: Some(handle.profile_uuid.borrow().clone()),
             pinned: page.is_pinned(),
             size: u32::try_from(terminal.column_count())
                 .ok()

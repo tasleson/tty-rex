@@ -43,8 +43,10 @@ use crate::container::{Container, Containers};
 use crate::dressing::{Dressing, DressingStyle};
 use crate::inspector::{Inspector, InspectorInit};
 use crate::leader::{self, LeaderKind};
+use crate::links::Links;
 use crate::palette;
 use crate::profile::Profile;
+use crate::profile_dialog::{CHANGE_PROFILE_LABEL, ProfileDialog};
 use crate::settings::{self, AppSettings, ExitAction};
 use crate::spawn::{self, ChildExit, SpawnError, SpawnRequest, Spawner};
 use crate::tab_notify::{self, TabNotify};
@@ -52,8 +54,8 @@ use crate::telemetry::Pid;
 use crate::terminal::{self, ZoomLevel};
 use crate::title_dialog::{SET_TITLE_LABEL, TitleDialog};
 use crate::window::{
-    READ_ONLY_ACTION, SetTitleAction, TOGGLE_TELEMETRY_LABEL, ToggleTelemetryAction,
-    hide_when_disabled,
+    READ_ONLY_ACTION, SetProfileAction, SetTitleAction, TOGGLE_TELEMETRY_LABEL,
+    ToggleTelemetryAction, UnfullscreenAction, hide_when_disabled,
 };
 
 /// Exits faster than this without user input are treated as failures so the
@@ -69,6 +71,8 @@ const EDIT_PROFILE_LABEL: &str = "Edit Profile";
 pub const EDIT_PROFILE_ACTION: &str = "app.edit-profile";
 
 const COPY_AS_HTML_ACTION: &str = "clipboard.copy-as-html";
+const COPY_LINK_ACTION: &str = "clipboard.copy-link";
+const OPEN_LINK_ACTION: &str = "terminal.open-link";
 const RESET_ACTION: &str = "tab.reset";
 
 /// Title of the color dialog and tooltip of the color dot.
@@ -379,6 +383,16 @@ fn context_menu() -> gio::Menu {
     ));
     menu.append_section(None, &section);
     let section = gio::Menu::new();
+    for (label, action) in [
+        ("_Open Link", OPEN_LINK_ACTION),
+        ("Copy _Link", COPY_LINK_ACTION),
+    ] {
+        let item = gio::MenuItem::new(Some(label), Some(action));
+        hide_when_disabled(&item);
+        section.append_item(&item);
+    }
+    menu.append_section(None, &section);
+    let section = gio::Menu::new();
     section.append(Some("_Copy"), Some("win.copy-clipboard"));
     let copy_as_html = gio::MenuItem::new(Some("Copy as _HTML"), Some(COPY_AS_HTML_ACTION));
     hide_when_disabled(&copy_as_html);
@@ -404,8 +418,14 @@ fn context_menu() -> gio::Menu {
     menu.append_section(None, &section);
     let section = gio::Menu::new();
     section.append_item(&RelmAction::<SetTitleAction>::to_menu_item(SET_TITLE_LABEL));
+    let change_profile = RelmAction::<SetProfileAction>::to_menu_item(CHANGE_PROFILE_LABEL);
+    hide_when_disabled(&change_profile);
+    section.append_item(&change_profile);
     menu.append_section(None, &section);
     let section = gio::Menu::new();
+    let leave_fullscreen = RelmAction::<UnfullscreenAction>::to_menu_item("Leave Fullscreen");
+    hide_when_disabled(&leave_fullscreen);
+    section.append_item(&leave_fullscreen);
     section.append(Some("_Inspect Terminal"), Some("tab.inspect"));
     menu.append_section(None, &section);
     menu
@@ -415,7 +435,7 @@ fn context_menu() -> gio::Menu {
 /// everything, or nothing when false, and `clipboard.copy-as-html` copies
 /// the selection as HTML, available only while there is one
 /// (`ptyxis_terminal_update_clipboard_actions()`).
-fn install_terminal_actions(terminal: &vte::Terminal) {
+fn install_terminal_actions(terminal: &vte::Terminal, links: &Links) {
     let select_all = gio::SimpleAction::new("select-all", Some(glib::VariantTy::BOOLEAN));
     let weak = terminal.downgrade();
     select_all.connect_activate(move |_, select| {
@@ -428,8 +448,76 @@ fn install_terminal_actions(terminal: &vte::Terminal) {
             terminal.unselect_all();
         }
     });
+    let open_link = gio::SimpleAction::new("open-link", None);
+    let copy_link = gio::SimpleAction::new("copy-link", None);
+    open_link.set_enabled(false);
+    copy_link.set_enabled(false);
+    // The link under the pointer when the menu was last asked for
+    // (`PtyxisTerminal.url`).
+    let url: Rc<RefCell<Option<String>>> = Rc::default();
+    let weak = terminal.downgrade();
+    let target = Rc::clone(&url);
+    open_link.connect_activate(move |_, _| {
+        if let (Some(terminal), Some(url)) = (weak.upgrade(), target.borrow().as_deref()) {
+            open_uri(&terminal, url);
+        }
+    });
+    let weak = terminal.downgrade();
+    let target = Rc::clone(&url);
+    copy_link.connect_activate(move |_, _| {
+        if let (Some(terminal), Some(url)) = (weak.upgrade(), target.borrow().as_deref()) {
+            terminal.clipboard().set_text(url);
+        }
+    });
+    // Enables the link actions only over a link, before VTE opens the
+    // menu (`ptyxis_terminal_update_url_actions()`).
+    let menu_click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    let links_at = links.clone();
+    let (open, copy) = (open_link.clone(), copy_link.clone());
+    let target = Rc::clone(&url);
+    menu_click.connect_pressed(move |click, _, x, y| {
+        let Some(terminal) = click.widget().and_downcast::<vte::Terminal>() else {
+            return;
+        };
+        let found = links_at.at(&terminal, x, y);
+        open.set_enabled(found.is_some());
+        copy.set_enabled(found.is_some());
+        *target.borrow_mut() = found;
+        click.set_state(gtk::EventSequenceState::None);
+    });
+    terminal.add_controller(menu_click);
+    // Control-click opens the link (`ptyxis_terminal_click_pressed_cb()`).
+    let open_click = gtk::GestureClick::builder()
+        .button(0)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    let links_at = links.clone();
+    open_click.connect_pressed(move |click, n_press, x, y| {
+        let Some(terminal) = click.widget().and_downcast::<vte::Terminal>() else {
+            return;
+        };
+        let button = click.current_button();
+        let control = click
+            .current_event_state()
+            .contains(gdk::ModifierType::CONTROL_MASK);
+        if n_press == 1
+            && (button == gdk::BUTTON_PRIMARY || button == gdk::BUTTON_MIDDLE)
+            && control
+            && let Some(url) = links_at.at(&terminal, x, y).filter(|url| !url.is_empty())
+        {
+            open_uri(&terminal, &url);
+            click.set_state(gtk::EventSequenceState::Claimed);
+        } else {
+            click.set_state(gtk::EventSequenceState::Denied);
+        }
+    });
+    terminal.add_controller(open_click);
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&select_all);
+    actions.add_action(&open_link);
     terminal.insert_action_group("terminal", Some(&actions));
 
     let copy_as_html = gio::SimpleAction::new("copy-as-html", None);
@@ -445,7 +533,23 @@ fn install_terminal_actions(terminal: &vte::Terminal) {
         .connect_selection_changed(move |terminal| action.set_enabled(terminal.has_selection()));
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&copy_as_html);
+    actions.add_action(&copy_link);
     terminal.insert_action_group("clipboard", Some(&actions));
+}
+
+/// Opens `uri` with the desktop's handler (`ptyxis_tab_open_uri()`).
+fn open_uri(terminal: &vte::Terminal, uri: &str) {
+    gtk::UriLauncher::new(uri).launch(
+        terminal.root().and_downcast_ref::<gtk::Window>(),
+        None::<&gio::Cancellable>,
+        |result| {
+            if let Err(e) = result
+                && !e.matches(gio::IOErrorEnum::Cancelled)
+            {
+                glib::g_warning!("tty-rex", "Failed to open link: {e}");
+            }
+        },
+    );
 }
 
 /// Puts the selection on the clipboard as plain text in `format`, which
@@ -501,6 +605,9 @@ pub struct TabInit {
     /// Identifies the tab, e.g. for its notifications (`uuid`).
     pub uuid: String,
     pub profile: Profile,
+    /// The uuid of the tab's profile, shared with the application for
+    /// new tabs and the session; kept current by "Change Profile".
+    pub profile_uuid: Rc<RefCell<String>>,
     pub app_settings: AppSettings,
     pub spawner: Rc<dyn Spawner>,
     pub containers: Containers,
@@ -561,6 +668,11 @@ pub enum TabInput {
     /// A highlight color in tty-rex's own settings changed.
     HighlightColorsChanged,
     ProfileChanged,
+    /// Opens "Change Profile" listing these profiles.
+    ShowProfileDialog(Vec<Profile>),
+    /// Switches the tab to another profile (`ptyxis_tab_apply_profile()`).
+    ApplyProfile(Profile),
+    ProfileDialogClosed(u32),
     AppearanceChanged,
     Bell,
     ZoomIn,
@@ -628,6 +740,12 @@ pub struct Tab {
     shared_handlers: Vec<(glib::Object, glib::SignalHandlerId)>,
     inspector: Option<Controller<Inspector>>,
     title_dialog: Option<TitleDialog>,
+    links: Links,
+    profile_dialog: Option<ProfileDialog>,
+    profile_dialog_serial: u32,
+    profile_uuid: Rc<RefCell<String>>,
+    /// The handler reporting changes of the current profile's settings.
+    profile_handler: Option<glib::SignalHandlerId>,
     /// Identifies the current title dialog, so a late "closed" message from
     /// a dialog that was force-closed cannot clear its successor.
     title_dialog_serial: u32,
@@ -1051,7 +1169,9 @@ impl Component for Tab {
         root.add_controller(focus);
 
         terminal.set_context_menu_model(Some(&context_menu()));
-        install_terminal_actions(&terminal);
+        let links = Links::default();
+        links.update(&terminal, &init.profile.custom_links());
+        install_terminal_actions(&terminal, &links);
         let input = sender.input_sender().clone();
         let inspect = gio::SimpleAction::new("inspect", None);
         inspect.connect_activate(move |_, _| input.emit(TabInput::Inspect));
@@ -1069,7 +1189,8 @@ impl Component for Tab {
         root.connect_unrealize(move |_| input.emit(TabInput::Unrealized));
 
         let input = sender.input_sender().clone();
-        init.profile
+        let profile_handler = init
+            .profile
             .gsettings()
             .connect_changed(None, move |_, _| input.emit(TabInput::ProfileChanged));
 
@@ -1123,6 +1244,11 @@ impl Component for Tab {
         let mut model = Tab {
             uuid: init.uuid,
             profile: init.profile,
+            profile_uuid: init.profile_uuid,
+            profile_handler: Some(profile_handler),
+            links,
+            profile_dialog: None,
+            profile_dialog_serial: 0,
             app_settings: init.app_settings,
             spawner: init.spawner,
             containers: init.containers,
@@ -1248,6 +1374,52 @@ impl Component for Tab {
             }
             TabInput::HighlightColorsChanged => self.update_dressing(),
             TabInput::ProfileChanged => {
+                self.links
+                    .update(&self.terminal, &self.profile.custom_links());
+                terminal::apply_profile(&self.terminal, &self.profile);
+                terminal::apply_profile_palette(&self.terminal, &self.profile);
+                self.update_dressing();
+                invalidate_thumbnail(root);
+            }
+            TabInput::ShowProfileDialog(profiles) => {
+                if self.profile_dialog.is_some() {
+                    return;
+                }
+                self.profile_dialog_serial = self.profile_dialog_serial.wrapping_add(1);
+                let serial = self.profile_dialog_serial;
+                let selected = sender.input_sender().clone();
+                let closed = sender.input_sender().clone();
+                let dialog = ProfileDialog::new(
+                    profiles,
+                    self.profile.uuid(),
+                    move |profile| selected.emit(TabInput::ApplyProfile(profile)),
+                    move || closed.emit(TabInput::ProfileDialogClosed(serial)),
+                );
+                dialog.present(root);
+                self.profile_dialog = Some(dialog);
+            }
+            TabInput::ProfileDialogClosed(serial) => {
+                if serial == self.profile_dialog_serial {
+                    self.profile_dialog = None;
+                }
+            }
+            TabInput::ApplyProfile(profile) => {
+                if profile.uuid() == self.profile.uuid() {
+                    return;
+                }
+                if let Some(id) = self.profile_handler.take() {
+                    self.profile.gsettings().disconnect(id);
+                }
+                let input = sender.input_sender().clone();
+                self.profile_handler = Some(
+                    profile
+                        .gsettings()
+                        .connect_changed(None, move |_, _| input.emit(TabInput::ProfileChanged)),
+                );
+                *self.profile_uuid.borrow_mut() = profile.uuid().to_owned();
+                self.profile = profile;
+                self.links
+                    .update(&self.terminal, &self.profile.custom_links());
                 terminal::apply_profile(&self.terminal, &self.profile);
                 terminal::apply_profile_palette(&self.terminal, &self.profile);
                 self.update_dressing();
@@ -1382,6 +1554,12 @@ impl Component for Tab {
         }
         if let Some(dialog) = self.title_dialog.take() {
             dialog.force_close();
+        }
+        if let Some(dialog) = self.profile_dialog.take() {
+            dialog.force_close();
+        }
+        if let Some(id) = self.profile_handler.take() {
+            self.profile.gsettings().disconnect(id);
         }
         self.cancel_color_dialog();
         for (object, id) in self.shared_handlers.drain(..) {

@@ -108,6 +108,9 @@ relm4::new_stateless_action!(pub ZoomOutAction, WindowActions, "zoom-out");
 relm4::new_stateless_action!(pub ZoomOneAction, WindowActions, "zoom-one");
 relm4::new_stateless_action!(pub SearchAction, WindowActions, "search");
 relm4::new_stateless_action!(pub SetTitleAction, WindowActions, "set-title");
+relm4::new_stateless_action!(pub SetProfileAction, WindowActions, "set-profile");
+relm4::new_stateless_action!(pub FullscreenAction, WindowActions, "fullscreen");
+relm4::new_stateless_action!(pub UnfullscreenAction, WindowActions, "unfullscreen");
 // Tab colors and the telemetry footer are tty-rex additions, so these
 // have no C counterpart. The telemetry action's state is whether the
 // footer shows; activating it toggles that.
@@ -176,6 +179,7 @@ pub enum WindowInput {
     /// The telemetry footer was toggled to this visibility.
     SetTelemetryVisible(bool),
     SetTitle,
+    SetProfile,
     SetTabColor,
     ResetTabColor,
     ShowPreferences,
@@ -756,6 +760,62 @@ fn release_parked(app: &App, parked: &RefCell<ParkingLot<gtk::Widget>>) {
     }
 }
 
+/// Adds `win.fullscreen` and `win.unfullscreen`, each enabled only when
+/// it would change something, so "Leave Fullscreen" shows in the terminal
+/// menu only in fullscreen (`ptyxis_window_toplevel_state_changed_cb()`).
+fn track_fullscreen(window: &adw::ApplicationWindow) {
+    let weak = window.downgrade();
+    let fullscreen = RelmAction::<FullscreenAction>::new_stateless(move |_| {
+        if let Some(window) = weak.upgrade() {
+            window.fullscreen();
+        }
+    });
+    let weak = window.downgrade();
+    let unfullscreen = RelmAction::<UnfullscreenAction>::new_stateless(move |_| {
+        if let Some(window) = weak.upgrade() {
+            window.unfullscreen();
+        }
+    });
+    let fullscreen = fullscreen.gio_action().clone();
+    let unfullscreen = unfullscreen.gio_action().clone();
+    window.add_action(&fullscreen);
+    window.add_action(&unfullscreen);
+    let update = move |window: &adw::ApplicationWindow| {
+        let is_fullscreen = window.is_fullscreen();
+        fullscreen.set_enabled(!is_fullscreen);
+        unfullscreen.set_enabled(is_fullscreen);
+    };
+    update(window);
+    window.connect_fullscreened_notify(update);
+}
+
+/// Adds `win.set-profile`, which \"Change Profile\" needs a tab for and
+/// more than one profile to choose from.
+fn track_set_profile(
+    window: &adw::ApplicationWindow,
+    app: &Rc<App>,
+    tab_view: &adw::TabView,
+    sender: &ComponentSender<Window>,
+) {
+    let action = add_action::<SetProfileAction>(window, sender, || WindowInput::SetProfile);
+    let update = {
+        let weak_app = Rc::downgrade(app);
+        let weak_view = tab_view.downgrade();
+        move || {
+            let (Some(app), Some(tab_view)) = (weak_app.upgrade(), weak_view.upgrade()) else {
+                return;
+            };
+            action.set_enabled(tab_view.selected_page().is_some() && app.profile_count() > 1);
+        }
+    };
+    update();
+    let notify = update.clone();
+    tab_view.connect_selected_page_notify(move |_| notify());
+    // The profile menu is rebuilt whenever profiles come or go.
+    app.profile_menu()
+        .connect_items_changed(move |_, _, _, _| update());
+}
+
 /// Keeps `win.pin-tab` / `win.unpin-tab` in line with the selected page
 /// (`ptyxis_window_selected_page_notify_pinned_cb()`).
 fn track_pinned(
@@ -1091,6 +1151,8 @@ impl Component for Window {
             reset_color.set_enabled(has_color);
         });
         add_action::<TabOverviewAction>(&window, &sender, || WindowInput::ToggleOverview);
+        track_fullscreen(&window);
+        track_set_profile(&window, &app, &tab_view, &sender);
         add_action::<PreferencesAction>(&window, &sender, || WindowInput::ShowPreferences);
         add_action::<ShowKeyboardShortcutsAction>(&window, &sender, || {
             WindowInput::ShowKeyboardShortcuts
@@ -1274,6 +1336,11 @@ impl Component for Window {
                     self.find_bar_revealer.set_reveal_child(true);
                     self.find_bar.emit(FindBarInput::Focus);
                 }
+            }
+            WindowInput::SetProfile => {
+                self.send_to_active_tab(crate::tab::TabInput::ShowProfileDialog(
+                    self.app.profile_list(),
+                ));
             }
             WindowInput::SetTitle => self.send_to_active_tab(TabInput::ShowTitleDialog),
             WindowInput::SetTabColor => self.send_to_active_tab(TabInput::ShowColorDialog),
