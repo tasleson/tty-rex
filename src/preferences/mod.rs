@@ -155,7 +155,7 @@ impl Preferences {
     fn current_palette_id(&self) -> String {
         self.default_profile
             .as_ref()
-            .map(Profile::palette_id)
+            .map(|profile| profile.palette_id().into())
             .unwrap_or_default()
     }
 

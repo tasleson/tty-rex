@@ -155,7 +155,7 @@ pub fn custom_links_from_variant(value: &glib::Variant) -> Option<Vec<CustomLink
 pub fn custom_links_to_variant(links: &[CustomLink]) -> glib::Variant {
     links
         .iter()
-        .map(|link| (link.pattern.clone(), link.target.clone()))
+        .map(|link| (link.pattern.as_str(), link.target.as_str()))
         .collect::<Vec<_>>()
         .to_variant()
 }
@@ -193,8 +193,8 @@ impl Profile {
         display_label(&self.settings.string(key::LABEL)).to_owned()
     }
 
-    pub fn palette_id(&self) -> String {
-        self.settings.string(key::PALETTE).into()
+    pub fn palette_id(&self) -> glib::GString {
+        self.settings.string(key::PALETTE)
     }
 
     pub fn scrollback_lines(&self) -> i64 {
