@@ -19,16 +19,15 @@
 
 //! The `VteTerminal` subclass tabs use, for the parts of `PtyxisTerminal`
 //! (`src/ptyxis-terminal.c`) that need a subclass: the snapshot override,
-//! the hover-URI revealer with its `measure`/`size_allocate` overrides, and
-//! the drop target with its highlight, which pastes dropped files, URIs and
-//! text.
-//!
-//! The size revealer has no counterpart in tty-rex yet.
+//! the size and hover-URI revealers with their `measure`/`size_allocate`
+//! overrides, and the drop target with its highlight, which pastes dropped
+//! files, URIs and text.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::time::Duration;
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, graphene, gsk, pango};
@@ -45,6 +44,19 @@ const HOVER_URI_CSS_CLASS: &str = "hover-uri";
 
 /// Width limit of the hover-URI label, from `ptyxis-terminal.ui`.
 const HOVER_URI_MAX_WIDTH_CHARS: i32 = 60;
+
+/// Style class `style.css` and the window dressing give the size revealer,
+/// as in `ptyxis-terminal.ui`.
+const SIZE_CSS_CLASS: &str = "size";
+
+/// Font family and features of the size label, from `ptyxis-terminal.ui`:
+/// tabular figures keep the label from jittering while it counts.
+const SIZE_LABEL_FAMILY: &str = "Sans";
+const SIZE_LABEL_FONT_FEATURES: &str = "tnum";
+
+/// How long the size label stays up after the last resize
+/// (`SIZE_DISMISS_TIMEOUT_MSEC`).
+const SIZE_DISMISS_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Style class of the drop highlight, as in `ptyxis-terminal.ui`.
 const DROP_HIGHLIGHT_CSS_CLASS: &str = "drop-highlight";
@@ -267,11 +279,72 @@ fn hover_uri_allocation(
     gtk::Allocation::new(-padding.left, y, width, height)
 }
 
+/// The size label text, as `ptyxis_terminal_size_allocate()` formats it.
+fn size_label_text(columns: i64, rows: i64) -> String {
+    format!("{columns} × {rows}")
+}
+
+/// What an allocation does to the size revealer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeLabelAction {
+    /// Show the new grid size and restart the dismiss timeout.
+    Reveal,
+    /// Hide it at once.
+    Dismiss,
+    /// Leave it as it is.
+    Keep,
+}
+
+impl SizeLabelAction {
+    /// The choice in `ptyxis_terminal_size_allocate()`: a grid size change
+    /// with `show-window-size` on shows the label on the active terminal of
+    /// a window that is neither maximized nor fullscreen (whose size the
+    /// user is not dragging), and such a window hides it whatever changed.
+    /// `window_maximized` is `None` when the terminal is not in a window.
+    fn for_allocation(
+        grid_size_changed: bool,
+        show_window_size: bool,
+        active: bool,
+        window_maximized: Option<bool>,
+    ) -> Self {
+        match window_maximized {
+            Some(false) if active && grid_size_changed && show_window_size => Self::Reveal,
+            Some(true) => Self::Dismiss,
+            _ => Self::Keep,
+        }
+    }
+}
+
+/// Where the size revealer goes, as in `ptyxis_terminal_size_allocate()`:
+/// at the bottom right, over the right and bottom padding, at its minimum
+/// size.
+fn size_allocation(
+    terminal: &TerminalBox,
+    minimum_width: i32,
+    minimum_height: i32,
+) -> gtk::Allocation {
+    gtk::Allocation::new(
+        terminal.width - minimum_width + terminal.padding.right,
+        terminal.height + terminal.padding.bottom + terminal.margin.bottom - minimum_height,
+        minimum_width,
+        minimum_height,
+    )
+}
+
 mod imp {
     use super::*;
 
     #[derive(Default)]
     pub struct TerminalWidget {
+        size_revealer: OnceCell<gtk::Revealer>,
+        size_label: OnceCell<gtk::Label>,
+        /// Pending hide of the size revealer (`size_dismiss_source`).
+        size_dismiss_source: RefCell<Option<glib::SourceId>>,
+        /// Grid size at the last allocation, to spot changes.
+        n_columns: Cell<i64>,
+        n_rows: Cell<i64>,
+        /// The `show-window-size` setting, kept current by the tab.
+        show_window_size: Cell<bool>,
         hover_uri_revealer: OnceCell<gtk::Revealer>,
         hover_uri_label: OnceCell<gtk::Label>,
         drop_highlight: OnceCell<adw::Bin>,
@@ -307,6 +380,25 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
+
+            // The size revealer from `ptyxis-terminal.ui`.
+            let attributes = pango::AttrList::new();
+            attributes.insert(pango::AttrString::new_family(SIZE_LABEL_FAMILY));
+            attributes.insert(pango::AttrFontFeatures::new(SIZE_LABEL_FONT_FEATURES));
+            let label = gtk::Label::builder().attributes(&attributes).build();
+            let revealer = gtk::Revealer::builder()
+                .transition_type(gtk::RevealerTransitionType::Crossfade)
+                .reveal_child(false)
+                .css_classes([SIZE_CSS_CLASS])
+                .halign(gtk::Align::End)
+                .valign(gtk::Align::End)
+                .child(&label)
+                .build();
+            revealer.set_parent(&*obj);
+            self.size_label.set(label).expect("constructed runs once");
+            self.size_revealer
+                .set(revealer)
+                .expect("constructed runs once");
 
             // The hover-URI revealer from `ptyxis-terminal.ui`.
             let label = gtk::Label::builder()
@@ -400,8 +492,15 @@ mod imp {
         }
 
         fn dispose(&self) {
-            // `gtk_widget_dispose_template()` in `ptyxis_terminal_dispose()`.
-            if let Some(revealer) = self.hover_uri_revealer.get() {
+            // `ptyxis_terminal_dispose()`.
+            if let Some(source) = self.size_dismiss_source.take() {
+                source.remove();
+            }
+            // `gtk_widget_dispose_template()` there.
+            for revealer in [self.size_revealer.get(), self.hover_uri_revealer.get()]
+                .into_iter()
+                .flatten()
+            {
                 revealer.unparent();
             }
             if let Some(highlight) = self.drop_highlight.get() {
@@ -411,23 +510,24 @@ mod imp {
     }
 
     impl WidgetImpl for TerminalWidget {
-        /// `ptyxis_terminal_measure()`: at least as big as the revealer.
+        /// `ptyxis_terminal_measure()`: at least as big as the revealers.
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
-            let (minimum, natural, minimum_baseline, natural_baseline) =
+            let (mut minimum, mut natural, minimum_baseline, natural_baseline) =
                 self.parent_measure(orientation, for_size);
-            let (revealer_minimum, revealer_natural, _, _) =
-                self.hover_uri_revealer().measure(orientation, for_size);
-            (
-                minimum.max(revealer_minimum),
-                natural.max(revealer_natural),
-                minimum_baseline,
-                natural_baseline,
-            )
+            for revealer in [self.size_revealer(), self.hover_uri_revealer()] {
+                let (revealer_minimum, revealer_natural, _, _) =
+                    revealer.measure(orientation, for_size);
+                minimum = minimum.max(revealer_minimum);
+                natural = natural.max(revealer_natural);
+            }
+            (minimum, natural, minimum_baseline, natural_baseline)
         }
 
-        /// `ptyxis_terminal_size_allocate()`, for the hover-URI revealer.
+        /// `ptyxis_terminal_size_allocate()`: shows the grid size when it
+        /// changes and places the revealers and drop highlight.
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
             self.parent_size_allocate(width, height, baseline);
+            self.update_size_label();
 
             let widget = self.obj();
             // As in `snapshot`, the C code reads these the deprecated way.
@@ -442,6 +542,10 @@ mod imp {
                 padding: padding.into(),
                 margin: margin.into(),
             };
+            let revealer = self.size_revealer();
+            let (min, _) = revealer.preferred_size();
+            revealer.size_allocate(&size_allocation(&terminal, min.width(), min.height()), -1);
+
             let revealer = self.hover_uri_revealer();
             let (min, nat) = revealer.preferred_size();
             let pointer_y = self.pointer_in_widget.get().then(|| self.pointer_y.get());
@@ -476,6 +580,7 @@ mod imp {
             self.rewrite_snapshot(snapshot);
             snapshot.pop();
 
+            widget.snapshot_child(self.size_revealer(), snapshot);
             widget.snapshot_child(self.hover_uri_revealer(), snapshot);
             widget.snapshot_child(self.drop_highlight(), snapshot);
         }
@@ -484,6 +589,83 @@ mod imp {
     impl TerminalImpl for TerminalWidget {}
 
     impl TerminalWidget {
+        pub(super) fn set_show_window_size(&self, show: bool) {
+            self.show_window_size.set(show);
+        }
+
+        fn size_revealer(&self) -> &gtk::Revealer {
+            self.size_revealer
+                .get()
+                .expect("revealer is created in constructed")
+        }
+
+        /// `ptyxis_terminal_is_active()`: whether this is the terminal of
+        /// its window's selected tab.
+        fn is_active(&self) -> bool {
+            let obj = self.obj();
+            obj.ancestor(adw::TabView::static_type())
+                .and_downcast::<adw::TabView>()
+                .and_then(|tab_view| tab_view.selected_page())
+                .is_some_and(|page| obj.is_ancestor(&page.child()))
+        }
+
+        /// The size label part of `ptyxis_terminal_size_allocate()`.
+        fn update_size_label(&self) {
+            let obj = self.obj();
+            let columns = obj.column_count();
+            let rows = obj.row_count();
+            let grid_size_changed = self.n_columns.get() != columns || self.n_rows.get() != rows;
+            self.n_columns.set(columns);
+            self.n_rows.set(rows);
+
+            let window_maximized = obj
+                .root()
+                .and_downcast::<gtk::Window>()
+                .map(|window| window.is_maximized() || window.is_fullscreen());
+            let action = SizeLabelAction::for_allocation(
+                grid_size_changed,
+                self.show_window_size.get(),
+                self.is_active(),
+                window_maximized,
+            );
+            let revealer = self.size_revealer();
+            match action {
+                SizeLabelAction::Reveal => {
+                    let text = size_label_text(columns, rows);
+                    if let Some(label) = self.size_label.get() {
+                        label.set_label(&text);
+                        label.announce(&text, gtk::AccessibleAnnouncementPriority::Medium);
+                    }
+                    revealer.set_reveal_child(true);
+                    self.cancel_size_dismiss();
+                    let source = glib::timeout_add_local_once(
+                        SIZE_DISMISS_TIMEOUT,
+                        glib::clone!(
+                            #[weak(rename_to = this)]
+                            self,
+                            move || {
+                                // `dismiss_size_label_cb()`.
+                                this.size_dismiss_source.take();
+                                this.size_revealer().set_reveal_child(false);
+                            }
+                        ),
+                    );
+                    self.size_dismiss_source.replace(Some(source));
+                }
+                SizeLabelAction::Dismiss => {
+                    self.cancel_size_dismiss();
+                    revealer.set_reveal_child(false);
+                }
+                SizeLabelAction::Keep => {}
+            }
+        }
+
+        fn cancel_size_dismiss(&self) {
+            if let Some(source) = self.size_dismiss_source.take() {
+                source.remove();
+            }
+        }
+
         fn hover_uri_revealer(&self) -> &gtk::Revealer {
             self.hover_uri_revealer
                 .get()
@@ -771,6 +953,11 @@ impl TerminalWidget {
     pub fn new() -> Self {
         glib::Object::new()
     }
+
+    /// Whether resizing shows the grid size (`show-window-size`).
+    pub fn set_show_window_size(&self, show: bool) {
+        self.imp().set_show_window_size(show);
+    }
 }
 
 impl Default for TerminalWidget {
@@ -818,6 +1005,61 @@ mod tests {
                 (alloc.x(), alloc.y(), alloc.width(), alloc.height()),
                 (-6, expected.1, expected.0, 20),
                 "pointer at {pointer_y:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn size_allocation_sits_bottom_right() {
+        let terminal = TerminalBox {
+            width: 600,
+            height: 400,
+            padding: Sides {
+                top: 7,
+                right: 6,
+                bottom: 3,
+                left: 6,
+            },
+            margin: Sides {
+                bottom: 1,
+                ..Sides::default()
+            },
+        };
+        let alloc = size_allocation(&terminal, 80, 24);
+        // x: 600 - 80 + 6; y: 400 + 3 + 1 - 24.
+        assert_eq!(
+            (alloc.x(), alloc.y(), alloc.width(), alloc.height()),
+            (526, 380, 80, 24)
+        );
+    }
+
+    #[test]
+    fn size_label_text_matches_ptyxis() {
+        assert_eq!(size_label_text(80, 24), "80 × 24");
+        assert_eq!(size_label_text(132, 7), "132 × 7");
+    }
+
+    #[test]
+    fn size_label_action() {
+        use SizeLabelAction::{Dismiss, Keep, Reveal};
+        // (grid size changed, show-window-size, active, window maximized)
+        let cases = [
+            ((true, true, true, Some(false)), Reveal),
+            // Nothing to show.
+            ((false, true, true, Some(false)), Keep),
+            ((true, false, true, Some(false)), Keep),
+            ((true, true, false, Some(false)), Keep),
+            // Not in a window yet.
+            ((true, true, true, None), Keep),
+            // Maximized or fullscreen windows never show it.
+            ((true, true, true, Some(true)), Dismiss),
+            ((false, false, false, Some(true)), Dismiss),
+        ];
+        for ((changed, show, active, maximized), expected) in cases {
+            assert_eq!(
+                SizeLabelAction::for_allocation(changed, show, active, maximized),
+                expected,
+                "{changed} {show} {active} {maximized:?}"
             );
         }
     }

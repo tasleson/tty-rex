@@ -49,9 +49,9 @@ const MIN_POPOVER_OPACITY: f64 = 0.85;
 /// How far the backdrop title bar fades towards the terminal background.
 const BACKDROP_FOREGROUND_MIX: f32 = 0.025;
 const BACKDROP_BACKGROUND_MIX: f32 = 0.99;
-/// How far the hover-URI label background leans towards the title bar
-/// foreground.
-const HOVER_URI_FOREGROUND_MIX: f32 = 0.05;
+/// How far the size and hover-URI label backgrounds lean towards the title
+/// bar foreground.
+const REVEALER_FOREGROUND_MIX: f32 = 0.05;
 /// Share of the background in the palette-derived accent color.
 const ACCENT_BACKGROUND_MIX: f32 = 0.15;
 /// Backdrop of thumbnail close buttons per state (`ptyxis-window-dressing.c`).
@@ -93,8 +93,7 @@ fn rule(css: &mut String, selector: &str, color: &gdk::RGBA, background: &gdk::R
 
 /// The window CSS for the window carrying `css_class`, following
 /// `ptyxis_window_dressing_update()`. Selectors are adapted to the port's
-/// widget tree; the rule for the size label, which the port does not have
-/// yet, is left out.
+/// widget tree.
 pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
     let face = style.face;
     let window = format!("window.{css_class}");
@@ -136,17 +135,20 @@ pub fn dressing_css(css_class: &str, style: &DressingStyle<'_>) -> String {
         css,
         "{overview} popover > arrow {{ background-color: {popover_background}; }}"
     );
-    // The hover-URI label floats over the terminal in a tinted titlebar
-    // color, as opaque as popovers.
+    // The size and hover-URI labels float over the terminal in a tinted
+    // titlebar color, as opaque as popovers.
     rule(
         &mut css,
-        &format!("{overview} vte-terminal > revealer.hover-uri label"),
+        &format!(
+            "{overview} vte-terminal > revealer.size label, \
+             {overview} vte-terminal > revealer.hover-uri label"
+        ),
         &face.titlebar_foreground,
         &with_alpha(
             &palette::mix(
                 &face.titlebar_foreground,
                 &face.titlebar_background,
-                HOVER_URI_FOREGROUND_MIX,
+                REVEALER_FOREGROUND_MIX,
             ),
             popover_alpha,
         ),
@@ -456,21 +458,22 @@ mod tests {
                 &face.titlebar_foreground,
                 &with_alpha(&face.titlebar_background, popover_alpha),
             );
-            let hover_uri = rule_for(
-                "window.ptyxis-tab-1 taboverview vte-terminal > revealer.hover-uri label",
+            let revealer_labels = rule_for(
+                "window.ptyxis-tab-1 taboverview vte-terminal > revealer.size label, \
+                 window.ptyxis-tab-1 taboverview vte-terminal > revealer.hover-uri label",
                 &face.titlebar_foreground,
                 &with_alpha(
                     &palette::mix(
                         &face.titlebar_foreground,
                         &face.titlebar_background,
-                        HOVER_URI_FOREGROUND_MIX,
+                        REVEALER_FOREGROUND_MIX,
                     ),
                     popover_alpha,
                 ),
             );
             assert!(css.contains(&window), "{opacity}: {css}");
             assert!(css.contains(&popover), "{opacity}: {css}");
-            assert!(css.contains(&hover_uri), "{opacity}: {css}");
+            assert!(css.contains(&revealer_labels), "{opacity}: {css}");
         }
     }
 

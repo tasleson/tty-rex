@@ -123,8 +123,12 @@ pub fn create() -> vte::Terminal {
 /// clear of the window's rounded corners.
 const PADDED_CSS_CLASS: &str = "padded";
 
-/// Applies application-wide settings (font, cursor, bell, padding).
+/// Applies application-wide settings (font, cursor, bell, padding, size
+/// label).
 pub fn apply_app_settings(terminal: &vte::Terminal, settings: &AppSettings) {
+    if let Some(terminal) = terminal.downcast_ref::<TerminalWidget>() {
+        terminal.set_show_window_size(settings.show_window_size());
+    }
     terminal.set_audible_bell(settings.audible_bell());
     terminal.set_cursor_shape(settings.cursor_shape().into());
     terminal.set_cursor_blink_mode(settings.cursor_blink_mode().into());

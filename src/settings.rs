@@ -55,6 +55,7 @@ pub mod key {
     pub const RESTORE_SESSION: &str = "restore-session";
     pub const RESTORE_WINDOW_SIZE: &str = "restore-window-size";
     pub const SCROLLBAR_POLICY: &str = "scrollbar-policy";
+    pub const SHOW_WINDOW_SIZE: &str = "show-window-size";
     pub const TEXT_BLINK_MODE: &str = "text-blink-mode";
     pub const USE_SYSTEM_FONT: &str = "use-system-font";
     pub const VISUAL_BELL: &str = "visual-bell";
@@ -83,6 +84,7 @@ pub mod key {
         RESTORE_SESSION,
         RESTORE_WINDOW_SIZE,
         SCROLLBAR_POLICY,
+        SHOW_WINDOW_SIZE,
         TEXT_BLINK_MODE,
         USE_SYSTEM_FONT,
         VISUAL_BELL,
@@ -571,6 +573,12 @@ impl AppSettings {
         self.settings.boolean(key::ENABLE_ZOOM_SCROLL_CTRL)
     }
 
+    /// Whether resizing shows the terminal grid size
+    /// (`ptyxis_settings_get_show_window_size()`).
+    pub fn show_window_size(&self) -> bool {
+        self.settings.boolean(key::SHOW_WINDOW_SIZE)
+    }
+
     pub fn ignore_osc_title(&self) -> bool {
         self.settings.boolean(key::IGNORE_OSC_TITLE)
     }
@@ -1025,6 +1033,8 @@ pub(crate) mod tests {
                 AppSettings::enable_zoom_scroll_ctrl,
                 true,
             ),
+            // Resizing shows the grid size by default.
+            (key::SHOW_WINDOW_SIZE, AppSettings::show_window_size, true),
         ];
         for &(name, get, default) in cases {
             assert_eq!(get(&settings), default, "{name} default");
