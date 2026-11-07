@@ -1449,8 +1449,14 @@ impl Component for Window {
             .child(telemetry_bar.widget())
             .build();
 
+        // Copies from a terminal announce themselves here
+        // (`ptyxis_terminal_toast()`).
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_vexpand(true);
+        toasts.set_child(Some(&tab_view));
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.append(&tab_view);
+        content.append(&toasts);
         content.append(&find_bar_revealer);
         content.append(&telemetry_revealer);
 

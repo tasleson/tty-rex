@@ -76,6 +76,10 @@ const OPEN_LINK_ACTION: &str = "terminal.open-link";
 const RESET_ACTION: &str = "tab.reset";
 /// VTE's signal around showing the context menu (`VteTerminal::setup-context-menu`).
 const SETUP_CONTEXT_MENU_SIGNAL: &str = "setup-context-menu";
+/// The toast after a copy, and how many seconds it stays
+/// (`copy_clipboard_action()`, `copy_link_address_action()`).
+const COPIED_TOAST_TITLE: &str = "Copied to clipboard";
+const COPIED_TOAST_TIMEOUT_SECS: u32 = 1;
 
 /// Title of the color dialog and tooltip of the color dot.
 const TAB_COLOR_TITLE: &str = "Tab Color";
@@ -480,7 +484,7 @@ fn context_menu() -> gio::Menu {
 /// everything, or nothing when false, and `clipboard.copy-as-html` copies
 /// the selection as HTML, available only while there is one
 /// (`ptyxis_terminal_update_clipboard_actions()`).
-fn install_terminal_actions(terminal: &vte::Terminal, links: &Links) {
+fn install_terminal_actions(terminal: &vte::Terminal, links: &Links, settings: &AppSettings) {
     let select_all = gio::SimpleAction::new("select-all", Some(glib::VariantTy::BOOLEAN));
     let weak = terminal.downgrade();
     select_all.connect_activate(move |_, select| {
@@ -512,6 +516,7 @@ fn install_terminal_actions(terminal: &vte::Terminal, links: &Links) {
     copy_link.connect_activate(move |_, _| {
         if let (Some(terminal), Some(url)) = (weak.upgrade(), target.borrow().as_deref()) {
             terminal.clipboard().set_text(url);
+            toast(&terminal, COPIED_TOAST_TIMEOUT_SECS, COPIED_TOAST_TITLE);
         }
     });
     // Before VTE shows the menu, enables the link actions only over a link,
@@ -565,9 +570,10 @@ fn install_terminal_actions(terminal: &vte::Terminal, links: &Links) {
     let copy_as_html = gio::SimpleAction::new("copy-as-html", None);
     copy_as_html.set_enabled(terminal.has_selection());
     let weak = terminal.downgrade();
+    let settings = settings.clone();
     copy_as_html.connect_activate(move |_, _| {
         if let Some(terminal) = weak.upgrade() {
-            copy_selection(&terminal, vte::Format::Html);
+            copy_selection(&terminal, vte::Format::Html, &settings);
         }
     });
     let action = copy_as_html.clone();
@@ -595,14 +601,32 @@ fn open_uri(terminal: &vte::Terminal, uri: &str) {
 }
 
 /// Puts the selection on the clipboard as plain text in `format`, which
-/// for HTML is the markup itself (`copy_clipboard_action()`).
-fn copy_selection(terminal: &vte::Terminal, format: vte::Format) {
+/// for HTML is the markup itself, and says so in a toast when
+/// `toast-on-copy-clipboard` asks for it (`copy_clipboard_action()`).
+fn copy_selection(terminal: &vte::Terminal, format: vte::Format, settings: &AppSettings) {
     if let Some(text) = terminal
         .text_selected(format)
         .filter(|text| !text.is_empty())
     {
         terminal.clipboard().set_text(&text);
+        if settings.toast_on_copy_clipboard() {
+            toast(terminal, COPIED_TOAST_TIMEOUT_SECS, COPIED_TOAST_TITLE);
+        }
     }
+}
+
+/// Shows `title` for `timeout` seconds in the window's toast overlay
+/// around `terminal`, if it has one (`ptyxis_terminal_toast()`).
+fn toast(terminal: &vte::Terminal, timeout: u32, title: &str) {
+    let Some(overlay) = terminal
+        .ancestor(adw::ToastOverlay::static_type())
+        .and_downcast::<adw::ToastOverlay>()
+    else {
+        return;
+    };
+    let toast = adw::Toast::new(title);
+    toast.set_timeout(timeout);
+    overlay.add_toast(toast);
 }
 
 /// `tab.reset(b)`: resets the terminal, also clearing the scrollback when
@@ -1220,7 +1244,7 @@ impl Component for Tab {
         terminal.set_context_menu_model(Some(&context_menu()));
         let links = Links::default();
         links.update(&terminal, &init.profile.custom_links());
-        install_terminal_actions(&terminal, &links);
+        install_terminal_actions(&terminal, &links, &init.app_settings);
         let input = sender.input_sender().clone();
         let inspect = gio::SimpleAction::new("inspect", None);
         inspect.connect_activate(move |_, _| input.emit(TabInput::Inspect));
@@ -1490,7 +1514,7 @@ impl Component for Tab {
             TabInput::ZoomOut => self.set_zoom(self.zoom.get().zoom_out()),
             TabInput::ScrollZoom(dy) => self.set_zoom(self.zoom.get().scrolled(dy)),
             TabInput::ZoomReset => self.set_zoom(ZoomLevel::DEFAULT),
-            TabInput::Copy => self.terminal.copy_clipboard_format(vte::Format::Text),
+            TabInput::Copy => copy_selection(&self.terminal, vte::Format::Text, &self.app_settings),
             // Ptyxis keeps clipboard.paste disabled unless the clipboard
             // holds text (`ptyxis_terminal_update_clipboard_actions()`).
             TabInput::Paste => {

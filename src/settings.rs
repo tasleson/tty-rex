@@ -58,6 +58,7 @@ pub mod key {
     pub const SHOW_WINDOW_SIZE: &str = "show-window-size";
     pub const TAB_MIDDLE_CLICK: &str = "tab-middle-click";
     pub const TEXT_BLINK_MODE: &str = "text-blink-mode";
+    pub const TOAST_ON_COPY_CLIPBOARD: &str = "toast-on-copy-clipboard";
     pub const USE_SYSTEM_FONT: &str = "use-system-font";
     pub const VISUAL_BELL: &str = "visual-bell";
     pub const VISUAL_PROCESS_LEADER: &str = "visual-process-leader";
@@ -88,6 +89,7 @@ pub mod key {
         SHOW_WINDOW_SIZE,
         TAB_MIDDLE_CLICK,
         TEXT_BLINK_MODE,
+        TOAST_ON_COPY_CLIPBOARD,
         USE_SYSTEM_FONT,
         VISUAL_BELL,
         VISUAL_PROCESS_LEADER,
@@ -592,6 +594,12 @@ impl AppSettings {
         self.settings.boolean(key::SHOW_WINDOW_SIZE)
     }
 
+    /// Whether copying the selection to the clipboard shows a toast
+    /// (`ptyxis_settings_get_toast_on_copy_clipboard()`).
+    pub fn toast_on_copy_clipboard(&self) -> bool {
+        self.settings.boolean(key::TOAST_ON_COPY_CLIPBOARD)
+    }
+
     pub fn ignore_osc_title(&self) -> bool {
         self.settings.boolean(key::IGNORE_OSC_TITLE)
     }
@@ -1054,6 +1062,12 @@ pub(crate) mod tests {
             ),
             // Resizing shows the grid size by default.
             (key::SHOW_WINDOW_SIZE, AppSettings::show_window_size, true),
+            // Copying to the clipboard shows a toast by default.
+            (
+                key::TOAST_ON_COPY_CLIPBOARD,
+                AppSettings::toast_on_copy_clipboard,
+                true,
+            ),
         ];
         for &(name, get, default) in cases {
             assert_eq!(get(&settings), default, "{name} default");
