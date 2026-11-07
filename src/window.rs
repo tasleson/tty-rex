@@ -45,7 +45,7 @@ use crate::settings::NewTabPosition;
 use crate::shortcuts::Shortcuts;
 use crate::tab_notify;
 use crate::telemetry_bar::{TelemetryBar, TelemetryBarInput};
-use crate::terminal;
+use crate::terminal::{self, ZoomLevel};
 use crate::title_dialog::SET_TITLE_LABEL;
 
 const DEFAULT_ICON_NAME: &str = "utilities-terminal-symbolic";
@@ -266,6 +266,9 @@ pub struct Window {
     _shortcuts: Option<Shortcuts>,
     /// Disabled without a selection so the shortcut reaches the terminal.
     copy_action: gio::SimpleAction,
+    /// `win.zoom-in`, `win.zoom-out` and `win.zoom-one`, enabled as the
+    /// selected tab's zoom allows.
+    zoom_actions: ZoomActions,
     /// Follows the selected page's `pinned` property so the tab menu only
     /// shows the applicable one.
     _pinned_signals: glib::SignalGroup,
@@ -293,6 +296,28 @@ pub struct Window {
     parked: Rc<RefCell<ParkingLot<gtk::Widget>>>,
     /// Briefly shows the header bars in fullscreen on a tab switch.
     fullscreen_box: FullscreenBox,
+}
+
+/// The zoom actions, whose sensitivity follows the selected tab's zoom.
+#[derive(Clone)]
+struct ZoomActions {
+    zoom_in: gio::SimpleAction,
+    zoom_out: gio::SimpleAction,
+    zoom_one: gio::SimpleAction,
+}
+
+impl ZoomActions {
+    /// Enables each action that applies at `zoom`, or none without a tab
+    /// (`ptyxis_window_notify_zoom_cb()` and
+    /// `ptyxis_window_page_changed_cb()`).
+    fn update(&self, zoom: Option<ZoomLevel>) {
+        self.zoom_in
+            .set_enabled(zoom.is_some_and(ZoomLevel::can_zoom_in));
+        self.zoom_out
+            .set_enabled(zoom.is_some_and(ZoomLevel::can_zoom_out));
+        self.zoom_one
+            .set_enabled(zoom.is_some_and(ZoomLevel::can_reset));
+    }
 }
 
 /// Registers a parameterless action that forwards `message` to the window
@@ -483,6 +508,7 @@ impl Window {
             tab.as_ref().map(|t| Rc::clone(&t.child_pid)),
         ));
         let Some(page) = page else {
+            self.zoom_actions.update(None);
             self.find_bar_revealer.set_reveal_child(false);
             self.window_title.set_title(config::APP_NAME);
             self.window_title.set_subtitle("");
@@ -521,9 +547,17 @@ impl Window {
         let fullscreen_box = self.fullscreen_box.clone();
         let commit_id =
             terminal::connect_commit_bytes(&tab.terminal, move || fullscreen_box.unreveal());
+        // The tab sets its zoom before the font scale, so the notify sees
+        // the new level (the tab's `notify::zoom` in Ptyxis).
+        let zoom_actions = self.zoom_actions.clone();
+        let zoom = Rc::clone(&tab.zoom);
+        zoom_actions.update(Some(zoom.get()));
+        let zoom_id = tab
+            .terminal
+            .connect_font_scale_notify(move |_| zoom_actions.update(Some(zoom.get())));
         self.terminal_handlers = Some((
             tab.terminal.clone(),
-            vec![cwd_id, selection_id, bell_id, commit_id],
+            vec![cwd_id, selection_id, bell_id, commit_id, zoom_id],
         ));
         tab.sender.emit(crate::tab::TabInput::Focus);
     }
@@ -1366,9 +1400,11 @@ impl Component for Window {
         let copy_action = add_action::<CopyAction>(&window, &sender, || WindowInput::Copy);
         copy_action.set_enabled(false);
         add_action::<PasteAction>(&window, &sender, || WindowInput::Paste);
-        add_action::<ZoomInAction>(&window, &sender, || WindowInput::ZoomIn);
-        add_action::<ZoomOutAction>(&window, &sender, || WindowInput::ZoomOut);
-        add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset);
+        let zoom_actions = ZoomActions {
+            zoom_in: add_action::<ZoomInAction>(&window, &sender, || WindowInput::ZoomIn),
+            zoom_out: add_action::<ZoomOutAction>(&window, &sender, || WindowInput::ZoomOut),
+            zoom_one: add_action::<ZoomOneAction>(&window, &sender, || WindowInput::ZoomReset),
+        };
         add_action::<SearchAction>(&window, &sender, || WindowInput::ShowFind);
         let input = sender.input_sender().clone();
         let toggle_telemetry =
@@ -1535,6 +1571,7 @@ impl Component for Window {
             telemetry_revealer,
             _shortcuts: shortcuts,
             copy_action,
+            zoom_actions,
             _pinned_signals: pinned_signals,
             terminal_handlers: None,
             tab_css_class: None,

@@ -61,6 +61,22 @@ impl ZoomLevel {
         Self((self.0 - 1).max(Self::MIN.0))
     }
 
+    /// Whether `win.zoom-in` applies, i.e. the level is below the maximum
+    /// (`ptyxis_window_notify_zoom_cb()`).
+    pub fn can_zoom_in(self) -> bool {
+        self != Self::MAX
+    }
+
+    /// Whether `win.zoom-out` applies, i.e. the level is above the minimum.
+    pub fn can_zoom_out(self) -> bool {
+        self != Self::MIN
+    }
+
+    /// Whether `win.zoom-one` applies, i.e. the level is not the default.
+    pub fn can_reset(self) -> bool {
+        self != Self::DEFAULT
+    }
+
     /// The level after a Ctrl+scroll of `dy`: scrolling up zooms in,
     /// down zooms out, as in `on_scroll_scrolled_cb()`.
     pub fn scrolled(self, dy: f64) -> Self {
@@ -382,6 +398,24 @@ mod tests {
         assert_eq!(ZoomLevel::MAX.zoom_in(), ZoomLevel::MAX);
         assert_eq!(ZoomLevel::MIN.zoom_out(), ZoomLevel::MIN);
         assert_eq!(ZoomLevel::DEFAULT.zoom_in().zoom_out(), ZoomLevel::DEFAULT);
+    }
+
+    #[test]
+    fn zoom_sensitivity() {
+        // (level, can zoom in, can zoom out, can reset)
+        let cases = [
+            (ZoomLevel::DEFAULT, true, true, false),
+            (ZoomLevel(1), true, true, true),
+            (ZoomLevel(-1), true, true, true),
+            (ZoomLevel(13), true, true, true),
+            (ZoomLevel::MAX, false, true, true),
+            (ZoomLevel::MIN, true, false, true),
+        ];
+        for (level, zoom_in, zoom_out, reset) in cases {
+            assert_eq!(level.can_zoom_in(), zoom_in, "{level:?}");
+            assert_eq!(level.can_zoom_out(), zoom_out, "{level:?}");
+            assert_eq!(level.can_reset(), reset, "{level:?}");
+        }
     }
 
     #[test]
