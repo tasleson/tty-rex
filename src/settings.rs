@@ -512,6 +512,25 @@ impl AppSettings {
         parse(self.settings.string(key).as_str())
     }
 
+    /// Whether every tab, not only pinned ones, comes back on the next
+    /// start (`ptyxis_settings_get_restore_session()`).
+    pub fn restore_session(&self) -> bool {
+        self.settings.boolean(key::RESTORE_SESSION)
+    }
+
+    pub fn restore_window_size(&self) -> bool {
+        self.settings.boolean(key::RESTORE_WINDOW_SIZE)
+    }
+
+    /// The configured (columns, rows) for new windows
+    /// (`ptyxis_settings_get_default_size()`).
+    pub fn default_grid_size(&self) -> (u32, u32) {
+        (
+            self.settings.uint(key::DEFAULT_COLUMNS),
+            self.settings.uint(key::DEFAULT_ROWS),
+        )
+    }
+
     pub fn visual_bell(&self) -> bool {
         self.settings.boolean(key::VISUAL_BELL)
     }
@@ -594,14 +613,7 @@ impl AppSettings {
     /// Initial terminal size in (columns, rows) for a new window.
     pub fn initial_grid_size(&self) -> (u32, u32) {
         let saved: (u32, u32) = self.settings.get(key::WINDOW_SIZE);
-        initial_grid_size(
-            self.settings.boolean(key::RESTORE_WINDOW_SIZE),
-            saved,
-            (
-                self.settings.uint(key::DEFAULT_COLUMNS),
-                self.settings.uint(key::DEFAULT_ROWS),
-            ),
-        )
+        initial_grid_size(self.restore_window_size(), saved, self.default_grid_size())
     }
 }
 

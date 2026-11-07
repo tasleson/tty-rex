@@ -59,6 +59,21 @@ impl ZoomLevel {
     pub fn zoom_out(self) -> Self {
         Self((self.0 - 1).max(Self::MIN.0))
     }
+
+    /// The `PtyxisZoomLevel` value, which numbers the steps from 1
+    /// (`PTYXIS_ZOOM_LEVEL_MINUS_14`), as stored in the session file.
+    pub fn to_ptyxis_enum(self) -> u32 {
+        (i32::from(self.0) - i32::from(Self::MIN.0) + 1).unsigned_abs()
+    }
+
+    /// The level for a `PtyxisZoomLevel` value, or `None` outside the enum.
+    pub fn from_ptyxis_enum(value: u32) -> Option<Self> {
+        let level = i64::from(value) + i64::from(Self::MIN.0) - 1;
+        i8::try_from(level)
+            .ok()
+            .map(Self)
+            .filter(|level| (Self::MIN..=Self::MAX).contains(level))
+    }
 }
 
 /// Creates a terminal configured like the one in `src/ptyxis-tab.ui`.
@@ -279,6 +294,26 @@ mod tests {
         assert_eq!(ZoomLevel::MAX.zoom_in(), ZoomLevel::MAX);
         assert_eq!(ZoomLevel::MIN.zoom_out(), ZoomLevel::MIN);
         assert_eq!(ZoomLevel::DEFAULT.zoom_in().zoom_out(), ZoomLevel::DEFAULT);
+    }
+
+    #[test]
+    fn zoom_ptyxis_enum() {
+        // PTYXIS_ZOOM_LEVEL_MINUS_14 = 1, DEFAULT = 15, PLUS_14 = 29.
+        let cases = [
+            (0, None),
+            (1, Some(ZoomLevel::MIN)),
+            (14, Some(ZoomLevel(-1))),
+            (15, Some(ZoomLevel::DEFAULT)),
+            (29, Some(ZoomLevel::MAX)),
+            (30, None),
+            (u32::MAX, None),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(ZoomLevel::from_ptyxis_enum(value), expected, "{value}");
+            if let Some(level) = expected {
+                assert_eq!(level.to_ptyxis_enum(), value);
+            }
+        }
     }
 
     #[test]
